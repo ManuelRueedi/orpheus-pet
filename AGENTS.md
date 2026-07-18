@@ -25,7 +25,7 @@ OrpheusTTS/
 │  ├─ src-tauri/src/       lib.rs (window/tray/hotkey) · stack.rs (backend) · selection.rs
 │  ├─ src-tauri/tauri.conf.json      window defs + bundle
 │  ├─ src-tauri/capabilities/        permission grants (baked at build)
-│  └─ stack.config.json    paths/ports/quant/hotkey  (git-ignored; copy from .example)
+│  └─ stack.config.json    paths/ports/quant/hotkey  (git-ignored; auto-created from .example on first run)
 ├─ Orpheus-FastAPI/        ← vendored TTS server (Apache-2.0). token→WAV via SNAC.
 ├─ llama/    models/       ← binaries + GGUF weights (git-ignored, fetched on setup)
 └─ logs/                   ← child-process logs
@@ -77,6 +77,14 @@ cargo check --manifest-path orpheus-pet/src-tauri/Cargo.toml
   `Q4_K_M` → `Q2_K`, auto-falls-back to `Q8_0` when a quant isn't published) and
   `llamaArgs` (`-ngl` GPU layers). Relative paths in that file resolve against
   its own directory (`resolve_paths` in stack.rs) — keep them portable.
+  **`quant` is a runtime download PREFERENCE** set from the panel's size dropdown:
+  `set_quant` (lib.rs → stack.rs) persists it and, ONLY if the current language's
+  model at that size is already on disk, hot-swaps via `set_language` — it never
+  downloads. Picking a language is what downloads (at the current `quant`). So the
+  size dropdown and the loaded voice are decoupled: the dropdown reflects the
+  preference, not necessarily the loaded model's quant. `model_status` takes an
+  optional `quant` so the panel can show per-size availability. `rebuildLangOptions`
+  doesn't tag the currently-loaded language (it's usable regardless of size).
 - **Autostart is release-only** (`#[cfg(not(debug_assertions))]` in `lib.rs`).
   The dev binary must not self-register — it needs the Vite dev server.
 - **Windows-only right now** (`taskkill`/`netstat`/`windows-sys`, `venv\Scripts`).

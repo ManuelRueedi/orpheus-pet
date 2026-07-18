@@ -89,6 +89,24 @@ async fn set_language(app: tauri::AppHandle, lang: String) -> Result<String, Str
 }
 
 #[tauri::command]
+fn get_quant(state: tauri::State<stack::Stack>) -> String {
+    state.current_quant()
+}
+
+// Change the voice-model size/quality and reload the current language at it. The
+// blocking download/reload runs off the async runtime; progress arrives via the
+// "model-progress" event, exactly like a language switch.
+#[tauri::command]
+async fn set_quant(app: tauri::AppHandle, quant: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<stack::Stack>();
+        stack::set_quant(&app, state.inner(), &quant).map(|_| quant)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn cancel_download(state: tauri::State<stack::Stack>) {
     stack::cancel_download(state.inner());
 }
@@ -112,6 +130,8 @@ pub fn run() {
             set_hotkey,
             get_language,
             set_language,
+            get_quant,
+            set_quant,
             cancel_download
         ])
         .setup(|app| {

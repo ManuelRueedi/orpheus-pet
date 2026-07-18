@@ -18,16 +18,27 @@
         <button id="hide" class="hide-btn" title="Hide to tray">–</button>
       </div>
 
-      <!-- Language + voice on one row. Swapped for the download UI when needed. -->
+      <!-- Language + voice pickers (always visible). -->
       <div id="pickerRows" class="panel-row">
         <select id="lang" title="Language"></select>
         <select id="voice" title="Voice"></select>
       </div>
-      <div class="panel-row confirm-row" id="confirmRow" style="display: none">
-        <span id="confirmMsg" class="confirm-msg"></span>
-        <button id="confirmDl" class="btn primary">Download</button>
-        <button id="confirmCancel" class="btn">Cancel</button>
+
+      <!-- Middle zone: normally the text box + Speak. The download confirm and
+           progress UIs take over this space (message on top, actions below). -->
+      <textarea id="text" rows="2" placeholder="Tell the witch what to say…  ·  Ctrl+Enter"></textarea>
+      <div class="panel-row" id="speakRow">
+        <button id="speak" class="btn primary">Speak</button>
       </div>
+
+      <div class="confirm-block" id="confirmRow" style="display: none">
+        <span id="confirmMsg" class="confirm-msg"></span>
+        <div class="panel-row confirm-actions">
+          <button id="confirmDl" class="btn primary">Download</button>
+          <button id="confirmCancel" class="btn">Cancel</button>
+        </div>
+      </div>
+
       <div class="panel-row dl-row" id="dlRow" style="display: none">
         <div class="dl-info">
           <span id="dlLabel">Downloading…</span>
@@ -36,13 +47,8 @@
         <button id="stopDl" class="btn">Stop</button>
       </div>
 
-      <textarea id="text" rows="2" placeholder="Tell the witch what to say…  ·  Ctrl+Enter"></textarea>
-
-      <div class="panel-row">
-        <button id="speak" class="btn primary">Speak</button>
-      </div>
-
       <div class="panel-row hotkey-row">
+        <select id="quality" title="Model size · VRAM shown is for full-GPU (optimal) performance — smaller runs on lower-end GPUs"></select>
         <button id="hotkey" class="btn hk-btn" title="Read-aloud hotkey — click, then press a shortcut">…</button>
       </div>
     </section>

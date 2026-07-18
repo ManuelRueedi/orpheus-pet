@@ -32,27 +32,45 @@ Highlight text in *any* app, hit a hotkey, and she reads it. 25 voices, 8 langua
 
 **Then:**
 
-```bash
+```powershell
 git clone https://github.com/ManuelRueedi/orpheus-pet.git OrpheusTTS
 cd OrpheusTTS
 
-# 1. TTS backend (Python)
+# One-shot setup: Python venv + backend deps, llama-server, config, pnpm install.
+# No NVIDIA GPU? add  -Cpu . Providing your own llama-server? add  -SkipLlama .
+.\setup.ps1
+
+# Run her:
+cd orpheus-pet
+pnpm tauri dev
+```
+
+<details>
+<summary><b>What <code>setup.ps1</code> does — or set it up by hand</b></summary>
+
+The script is just the manual steps in one place; run them yourself if you prefer:
+
+```powershell
+# 1. TTS backend (Python) — PyTorch is installed separately (CUDA wheel)
 cd Orpheus-FastAPI
 python -m venv venv
+venv\Scripts\python -m pip install torch --index-url https://download.pytorch.org/whl/cu124
 venv\Scripts\pip install -r requirements.txt
 cd ..
 
 # 2. llama-server — unzip a llama.cpp release (CUDA build) so you have:
-#    llama\llama-server.exe   (+ its .dll files)
+#    llama\llama-server.exe   (+ its .dll files, and the matching cudart DLLs)
 
-# 3. Config — copy the example (paths inside are relative, so this just works)
-copy orpheus-pet\stack.config.example.json orpheus-pet\stack.config.json
-
-# 4. The pet
+# 3. The pet
 cd orpheus-pet
 pnpm install
 pnpm tauri dev
 ```
+
+**Config is automatic:** on first launch the pet writes `orpheus-pet\stack.config.json`
+from the bundled default if it's missing, so there's no copy step. Edit that file
+afterwards to tune `quant` / `llamaArgs` for your GPU (see *Lower-spec machines* below).
+</details>
 
 **First run:** right-click the witch → pick your language → she downloads that
 voice model (~1.5–3.8 GB, with a bubbling cauldron progress bar 🫧) and starts
@@ -81,25 +99,39 @@ at login** from then on.
 ## 🐢 Lower-spec machines — swap the model
 
 Short on VRAM? The default `Q8_0` model is the nicest-sounding but the chunkiest.
-Open **`orpheus-pet/stack.config.json`** and turn two knobs:
+
+**Easiest — the model-size dropdown.** Right-click the witch and use the size
+picker in the panel (bottom, next to the hotkey): **Best quality** → **Balanced**
+→ **Low-spec**. It's a *download preference*: pick a size and the language list
+updates to show it — the next language you download comes at that size (with the
+cauldron progress bar). If you already have the current language at that size,
+she hot-swaps to it instantly. It never re-downloads your current voice on its
+own, so you can set size and language independently. No restart, no file editing;
+your pick sticks across restarts.
+
+| Pick | Quant | Rough size | Rough VRAM |
+|---|---|---|---|
+| Best quality | `Q8_0` | ~3.5 GB | 5–6 GB |
+| Balanced | `Q4_K_M` | ~2.4 GB | ~3 GB |
+| Low-spec | `Q2_K` | ~1.6 GB | ~2 GB |
+
+English has all three; other languages quietly fall back to `Q8_0` if a smaller
+one isn't published. Only one model is ever loaded at a time.
+
+**For the last drop of speed (or CPU-only),** hand-tune
+**`orpheus-pet/stack.config.json`** — the dropdown sets `quant`; this is how you
+reach the GPU-layers knob:
 
 ```jsonc
 {
-  "quant": "Q4_K_M",              // Q8_0 (best) → Q4_K_M (~2.2GB) → Q2_K (~1.5GB)
+  "quant": "Q4_K_M",              // same values as the dropdown
   "llamaArgs": ["-ngl", "20", "-c", "4096"]
 }
 ```
 
-- **`quant`** — how squished the model is. `Q8_0` sounds best; `Q4_K_M` is ~⅔ the
-  size for barely-worse audio; `Q2_K` is the smallest. English has all three;
-  other languages quietly fall back to `Q8_0` if a smaller one isn't published.
-  Change it, restart, and re-pick your language to fetch the lighter model.
 - **`-ngl`** — how many model layers ride on the GPU. `99` = all of it (needs the
   most VRAM). Lower it (say `20`) to share the load with your CPU, or set `0` for
   **CPU-only** — slow, but it runs on anything.
-
-Rough VRAM budget: `Q8_0` ≈ 5–6 GB · `Q4_K_M` ≈ 3 GB · `Q2_K` ≈ 2 GB. Only one
-model is ever loaded at a time.
 
 ---
 

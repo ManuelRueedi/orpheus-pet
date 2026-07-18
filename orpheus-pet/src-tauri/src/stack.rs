@@ -119,12 +119,37 @@ impl Stack {
         Ok(())
     }
 
+    // Write just the quant (size preference) back to stack.config.json.
+    pub fn persist_quant(&self, quant: &str) -> Result<(), String> {
+        let path = self
+            .cfg_path
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "config path unknown".to_string())?;
+        let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let mut v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        v["quant"] = serde_json::Value::String(quant.to_string());
+        let out = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+        fs::write(&path, out).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn current_language(&self) -> Option<String> {
         self.language.lock().unwrap().clone()
     }
 
     pub fn set_current_language(&self, lang: &str) {
         *self.language.lock().unwrap() = Some(lang.to_string());
+    }
+
+    pub fn current_quant(&self) -> String {
+        self.cfg
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|c| c.quant.clone())
+            .unwrap_or_else(d_quant)
     }
 
     fn set_model_path(&self, path: &Path) {
@@ -178,6 +203,26 @@ pub fn note(stack: &Stack, msg: String) {
     stack.notes.lock().unwrap().push(msg);
 }
 
+// The example config, baked into the binary so a first run with no
+// stack.config.json can create one instead of failing (saves the manual copy).
+const DEFAULT_CONFIG: &str = include_str!("../../stack.config.example.json");
+
+// Where to write stack.config.json when none exists yet. In dev the process cwd
+// is src-tauri, so the config belongs one level up at the app root (orpheus-pet/),
+// where its relative paths ("../llama/…") resolve correctly. In a release build we
+// fall back to next-to-the-exe. (Sidecar bundling will revisit the release side.)
+fn default_config_target() -> Option<PathBuf> {
+    if cfg!(debug_assertions) {
+        std::env::current_dir()
+            .ok()
+            .and_then(|d| d.parent().map(|p| p.join("stack.config.json")))
+    } else {
+        std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|p| p.join("stack.config.json")))
+    }
+}
+
 fn config_candidates() -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Ok(p) = std::env::var("ORPHEUS_PET_CONFIG") {
@@ -196,7 +241,9 @@ fn config_candidates() -> Vec<PathBuf> {
     v
 }
 
-fn load_config() -> Result<(StackConfig, PathBuf), String> {
+// Returns the parsed config, its path, and whether we just created it from the
+// bundled default (true) vs. found an existing file (false).
+fn load_config() -> Result<(StackConfig, PathBuf, bool), String> {
     let candidates = config_candidates();
     for path in &candidates {
         if path.is_file() {
@@ -204,8 +251,18 @@ fn load_config() -> Result<(StackConfig, PathBuf), String> {
                 .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
             let cfg: StackConfig = serde_json::from_str(&text)
                 .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
-            return Ok((cfg, path.clone()));
+            return Ok((cfg, path.clone(), false));
         }
+    }
+    // Nothing found: create stack.config.json from the baked-in example so a
+    // fresh clone / first run works without the manual copy step. Parse first so
+    // an invalid bundled default errors out instead of writing a broken file.
+    if let Some(target) = default_config_target() {
+        let cfg: StackConfig = serde_json::from_str(DEFAULT_CONFIG)
+            .map_err(|e| format!("bundled default config is invalid: {e}"))?;
+        fs::write(&target, DEFAULT_CONFIG)
+            .map_err(|e| format!("couldn't create {}: {e}", target.display()))?;
+        return Ok((cfg, target, true));
     }
     Err(format!(
         "stack.config.json not found (searched: {})",
@@ -390,7 +447,7 @@ fn wait_port(port: u16, timeout: Duration) -> bool {
 
 pub fn start(stack: &Stack) {
     let mut notes = Vec::new();
-    let (mut cfg, cfg_path) = match load_config() {
+    let (mut cfg, cfg_path, created) = match load_config() {
         Ok(v) => v,
         Err(e) => {
             stack
@@ -401,6 +458,12 @@ pub fn start(stack: &Stack) {
             return;
         }
     };
+    if created {
+        notes.push(format!(
+            "config: created {} from the bundled default — edit it to taste",
+            cfg_path.display()
+        ));
+    }
     // Resolve relative paths against the config file's own directory so a
     // shared config ("../models/…") works wherever the repo is cloned.
     let base = cfg_path
@@ -630,15 +693,24 @@ pub fn cancel_download(stack: &Stack) {
 }
 
 // Whether the model for `lang` is already downloaded, and its (estimated) size.
+// `quant` lets the panel ask about a size OTHER than the loaded one (e.g. "is the
+// smaller model already downloaded?" before offering to switch). None = the
+// current config quant, so existing callers are unaffected.
 #[tauri::command]
-pub fn model_status(state: tauri::State<'_, Stack>, lang: String) -> serde_json::Value {
+pub fn model_status(
+    state: tauri::State<'_, Stack>,
+    lang: String,
+    quant: Option<String>,
+) -> serde_json::Value {
     let (dir, quant) = {
         let guard = state.cfg.lock().unwrap();
         let dir = guard
             .as_ref()
             .and_then(|c| Path::new(&c.model).parent().map(|p| p.to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("models"));
-        let quant = guard.as_ref().map(|c| c.quant.clone()).unwrap_or_else(d_quant);
+        let quant = quant
+            .or_else(|| guard.as_ref().map(|c| c.quant.clone()))
+            .unwrap_or_else(d_quant);
         (dir, quant)
     };
     match model_base_for_lang(&lang) {
@@ -721,6 +793,52 @@ pub fn set_language(app: &AppHandle, stack: &Stack, lang: &str) -> Result<(), St
     stack.set_current_language(lang);
     let _ = stack.persist_model(&dest, lang);
     let _ = app.emit("model-progress", json!({"lang": lang, "phase": "ready"}));
+    Ok(())
+}
+
+// Change the quantisation (voice-model size) and reload the CURRENT language's
+// model at the new quant: download if needed, then hot-swap llama-server. This is
+// the panel's "model size / performance" knob — smaller quants keep the pet usable
+// on low-spec PCs. Persists to stack.config.json so the choice sticks.
+// Set the preferred voice-model size (quant) — the panel's "detail" knob. This is
+// a DOWNLOAD PREFERENCE, deliberately decoupled from the loaded voice:
+//   - always record the size (in-memory + persisted) so the size dropdown, the
+//     per-language download sizes, and the NEXT language download all use it;
+//   - if the current language already has a model at this size on disk, hot-swap
+//     to it so the playing voice matches the selected detail;
+//   - otherwise DON'T download — the current voice keeps playing and the new size
+//     takes effect the next time a language is picked.
+pub fn set_quant(app: &AppHandle, stack: &Stack, quant: &str) -> Result<(), String> {
+    let prev = stack.current_quant();
+    {
+        let mut guard = stack.cfg.lock().unwrap();
+        match guard.as_mut() {
+            Some(c) => c.quant = quant.to_string(),
+            None => return Err("stack not started".to_string()),
+        }
+    }
+    let _ = stack.persist_quant(quant);
+    if quant == prev {
+        return Ok(());
+    }
+    // Hot-swap only if the model at this size is already downloaded — never fetch
+    // here (that's what picking a language does).
+    let cfg = stack
+        .cfg
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "stack not started".to_string())?;
+    let lang = stack.current_language().unwrap_or_else(|| "en".to_string());
+    if let Some(base) = model_base_for_lang(&lang) {
+        let dir = Path::new(&cfg.model)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("models"));
+        if dir.join(model_file(base, quant)).is_file() {
+            return set_language(app, stack, &lang);
+        }
+    }
     Ok(())
 }
 
