@@ -29,7 +29,7 @@ Highlight text in *any* app, hit a hotkey, and she reads it. 25 voices, 8 langua
 **Then:**
 
 ```bash
-git clone <your-repo-url> OrpheusTTS
+git clone https://github.com/ManuelRueedi/orpheus-pet.git OrpheusTTS
 cd OrpheusTTS
 
 # 1. TTS backend (Python)
