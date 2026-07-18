@@ -72,19 +72,21 @@ cargo check --manifest-path orpheus-pet/src-tauri/Cargo.toml
   sets it when spawning; keep it.
 - **Each language is a separate GGUF.** The base `Orpheus-3b-FT` is English-only;
   non-English voices on it produce *garbage* (a runaway ~9s clip for one line is
-  the tell — byte-size ≠ good speech). `set_language` downloads + hot-swaps.
+  the tell — byte-size ≠ good speech). `set_model_selection` downloads +
+  hot-swaps an explicit language/quant pair; `set_language` and `set_quant`
+  remain compatibility wrappers.
 - **Model size / low-spec knobs** live in `stack.config.json`: `quant` (`Q8_0` →
   `Q4_K_M` → `Q2_K`, auto-falls-back to `Q8_0` when a quant isn't published) and
   `llamaArgs` (`-ngl` GPU layers). Relative paths in that file resolve against
   its own directory (`resolve_paths` in stack.rs) — keep them portable.
-  **`quant` is a runtime download PREFERENCE** set from the panel's size dropdown:
-  `set_quant` (lib.rs → stack.rs) persists it and, ONLY if the current language's
-  model at that size is already on disk, hot-swaps via `set_language` — it never
-  downloads. Picking a language is what downloads (at the current `quant`). So the
-  size dropdown and the loaded voice are decoupled: the dropdown reflects the
-  preference, not necessarily the loaded model's quant. `model_status` takes an
-  optional `quant` so the panel can show per-size availability. `rebuildLangOptions`
-  doesn't tag the currently-loaded language (it's usable regardless of size).
+  The panel stages its language and size dropdowns as **one model target**. Both
+  remain editable until the user confirms; `set_model_selection` (lib.rs →
+  stack.rs) then loads/downloads exactly that pair, never an intermediate pair.
+  Model operations carry an ID, target language/quant, terminal phase, and
+  loaded-vs-preferred quant so late events cannot overwrite a newer switch.
+  `model_status` and `installed_languages` accept an explicit `quant`; language
+  availability must always describe the staged size while identifying the
+  separately loaded pair.
 - **Autostart is release-only** (`#[cfg(not(debug_assertions))]` in `lib.rs`).
   The dev binary must not self-register — it needs the Vite dev server.
 - **Windows-only right now** (`taskkill`/`netstat`/`windows-sys`, `venv\Scripts`).

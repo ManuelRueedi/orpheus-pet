@@ -11,7 +11,7 @@
          hides, and positions it in the free space beside the witch. -->
     <section id="panel" class="panel" aria-label="Pet controls">
       <!-- Status: dot + label (or the equalizer while reading) + minimize -->
-      <div id="status" class="status state-thinking">
+      <div id="status" class="status state-thinking" aria-live="polite">
         <span class="st-dot"></span>
         <span id="statusText" class="st-text">Starting…</span>
         <span class="st-eq" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
@@ -20,8 +20,8 @@
 
       <!-- Language + voice pickers (always visible). -->
       <div id="pickerRows" class="panel-row">
-        <select id="lang" title="Language"></select>
-        <select id="voice" title="Voice"></select>
+        <select id="lang" title="Language" aria-label="Language"></select>
+        <select id="voice" title="Voice" aria-label="Voice"></select>
       </div>
 
       <!-- Middle zone: normally the text box + Speak. The download confirm and
@@ -31,8 +31,19 @@
         <button id="speak" class="btn primary">Speak</button>
       </div>
 
+      <!-- First-run / recovery state. This reuses the panel's middle zone so a
+           missing model or runtime is actionable without adding another window. -->
+      <div class="setup-block" id="setupRow" style="display: none" role="status">
+        <strong id="setupTitle" class="setup-title">Finish setup</strong>
+        <span id="setupMsg" class="setup-msg">Checking the speech engine…</span>
+        <span id="setupHint" class="setup-hint"></span>
+        <div class="panel-row setup-actions">
+          <button id="setupAction" class="btn primary">Check again</button>
+        </div>
+      </div>
+
       <div class="confirm-block" id="confirmRow" style="display: none">
-        <span id="confirmMsg" class="confirm-msg"></span>
+        <span id="confirmMsg" class="confirm-msg" aria-live="polite" aria-atomic="true"></span>
         <div class="panel-row confirm-actions">
           <button id="confirmDl" class="btn primary">Download</button>
           <button id="confirmCancel" class="btn">Cancel</button>
@@ -48,7 +59,7 @@
       </div>
 
       <div class="panel-row hotkey-row">
-        <select id="quality" title="Model size · VRAM shown is for full-GPU (optimal) performance — smaller runs on lower-end GPUs"></select>
+        <select id="quality" aria-label="Model size" title="Model size · VRAM shown is for full-GPU (optimal) performance — smaller runs on lower-end GPUs"></select>
         <button id="hotkey" class="btn hk-btn" title="Read-aloud hotkey — click, then press a shortcut">…</button>
       </div>
     </section>

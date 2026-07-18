@@ -18,7 +18,22 @@ Highlight text in *any* app, hit a hotkey, and she reads it. 25 voices, 8 langua
 
 ---
 
-## ✨ Quick start
+## ✨ Install or build
+
+### End-user install
+
+`Orpheus-Pet-Setup.exe` is the no-tooling path: install the pet, open its panel,
+and approve the one-time speech-runtime download. The app automatically chooses
+the NVIDIA or CPU pack, verifies the archive and every extracted file, activates
+it, then asks for the first voice model. Python, Node, pnpm, Rust, Git, and
+terminal-launched servers are not needed.
+
+The installer and matching runtime assets still need to be published to a
+GitHub release before that path can be downloaded by users; until then, build
+from source. See [Windows runtime packs](docs/runtime-packs.md) for building and
+publishing those release assets.
+
+### Build from source
 
 **You'll need** (Windows 10/11):
 
@@ -72,9 +87,9 @@ from the bundled default if it's missing, so there's no copy step. Edit that fil
 afterwards to tune `quant` / `llamaArgs` for your GPU (see *Lower-spec machines* below).
 </details>
 
-**First run:** right-click the witch → pick your language → she downloads that
-voice model (~1.5–3.8 GB, with a bubbling cauldron progress bar 🫧) and starts
-talking. That's it.
+**First run:** right-click the witch → choose a language and model size → confirm
+the combined choice. She downloads only that voice model (~1.5–3.8 GB, with a
+bubbling cauldron progress bar 🫧) and starts talking. That's it.
 
 To ship a real app: `pnpm tauri build` → an installer/exe lands in
 `orpheus-pet/src-tauri/target/release/`. Launch that once and she'll **auto-start
@@ -92,7 +107,8 @@ at login** from then on.
 - **Left-click while she's talking** → pause (duct tape goes *slap*). Click again
   to rip it off and resume.
 - **Global hotkey** (default **Ctrl+Alt+A**) → highlight text in *any* app and she
-  pops up and reads it. Rebind it in the panel.
+  reads it. If the pet is hidden in the tray, she speaks without appearing.
+  Rebind it in the panel.
 
 ---
 
@@ -100,14 +116,15 @@ at login** from then on.
 
 Short on VRAM? The default `Q8_0` model is the nicest-sounding but the chunkiest.
 
-**Easiest — the model-size dropdown.** Right-click the witch and use the size
-picker in the panel (bottom, next to the hotkey): **Best quality** → **Balanced**
-→ **Low-spec**. It's a *download preference*: pick a size and the language list
-updates to show it — the next language you download comes at that size (with the
-cauldron progress bar). If you already have the current language at that size,
-she hot-swaps to it instantly. It never re-downloads your current voice on its
-own, so you can set size and language independently. No restart, no file editing;
-your pick sticks across restarts.
+**Easiest — choose the language and size together.** Right-click the witch and
+use the language picker plus the size picker at the bottom: **Best quality** →
+**Balanced** → **Low-spec**. Changing either picker stages one combined target;
+both remain editable until you press **Switch** or **Download & switch**. For
+example, English Best quality → German Low-spec performs only the German
+Low-spec operation—there is no intermediate English Low-spec or German Best
+quality download. The language list shows availability for the staged size and
+identifies the model that is still active. No restart or file editing is needed,
+and the successfully loaded pair sticks across restarts.
 
 | Pick | Quant | Rough size | Rough VRAM |
 |---|---|---|---|

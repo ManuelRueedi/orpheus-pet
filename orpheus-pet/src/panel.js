@@ -40,8 +40,30 @@ const LANG_ORDER = ["en", "fr", "de", "es", "it", "ko", "hi", "zh"];
 
 let allVoices = [];
 let currentLang = "en";
+let loadedLang = null;
 let availableLangs = [];
 let switchingLang = false;
+let engineReady = false;
+let modelManagementReady = false;
+let currentStackState = "starting-backend";
+let panelState = "idle";
+let voicesAreLive = false;
+let readinessPoll = 0;
+let readinessRevision = 0;
+let readinessStateSince = Date.now();
+let operationError = "";
+let operationRetryKind = "model";
+let retryLanguage = null;
+let retryQuant = null;
+let runtimeInstallPlan = null;
+let runtimeInstallPlanLoading = false;
+let installingRuntime = false;
+let backendModelOperationActive = false;
+let probingSelection = false;
+let selectionRevision = 0;
+let langOptionsRevision = 0;
+let operationSequence = 0;
+let activeOperationId = null;
 
 // Voice-model size presets (the config's `quant`). Smaller = faster + less
 // VRAM/disk, at some quality cost. English publishes all three; other languages
@@ -62,6 +84,40 @@ const quantGb = (id) => ((QUANT_BYTES[id] || QUANT_BYTES.Q8_0) / 1e9).toFixed(1)
 // Seed from the last local choice so size tags are right immediately; initQuantUi
 // refines it from the backend (authoritative) once the engine answers.
 let currentQuant = localStorage.getItem("pet.quant") || "Q8_0";
+let loadedQuant = null;
+let stagedVoice = null;
+
+function newOperationId(kind) {
+  operationSequence += 1;
+  const suffix = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${operationSequence}`;
+  return `${kind}-${suffix}`;
+}
+
+function ensureQuantOption(quant) {
+  const sel = el("quality");
+  if (!sel || !quant || [...sel.options].some((o) => o.value === quant)) return;
+  const opt = document.createElement("option");
+  opt.value = quant;
+  opt.textContent = quantLabel(quant);
+  sel.appendChild(opt);
+}
+
+function updatePickerGate() {
+  // Availability probes and confirmations are staged UI, not active model work:
+  // keep both selectors editable so language + size can be composed either way.
+  const busy = switchingLang || installingRuntime || backendModelOperationActive;
+  el("lang").disabled = !modelManagementReady || busy;
+  el("quality").disabled = !modelManagementReady || busy;
+}
+
+function hasStagedModelSelection() {
+  return currentLang !== loadedLang || currentQuant !== loadedQuant ||
+    pendingAction?.kind === "model-selection" || probingSelection;
+}
+
+function publishSwitching(active, operationId) {
+  emitTo("main", "ui:switching", { active, operationId }).catch(() => {});
+}
 
 // Every voice maps to a language (a Korean voice → Korean lines, etc.).
 function langForVoice(voice) {
@@ -104,9 +160,8 @@ function fillVoiceOptions(lang) {
   else if (list.length) sel.value = list[0];
 }
 
-// The currently active language = whichever model the engine actually has
-// loaded (Rust get_language). Falls back to saved/Windows locale if the command
-// isn't available (e.g. engine still booting).
+// Prefer the language the engine actually loaded (Rust get_language). With no
+// model yet, fall back to the saved/Windows locale as the initial staged choice.
 async function currentLangFromBackend() {
   try {
     const l = await invoke("get_language");
@@ -117,13 +172,19 @@ async function currentLangFromBackend() {
 
 // (Re)build the language dropdown, tagging languages whose model isn't downloaded
 // yet with the size for the CURRENTLY selected quality. Preserves the selection.
-async function rebuildLangOptions() {
+async function rebuildLangOptions({ quant = currentQuant } = {}) {
+  const revision = ++langOptionsRevision;
+  const selectedQuant = quant;
   let installed = null;
   try {
-    installed = await invoke("installed_languages");
+    installed = await invoke("installed_languages", { quant: selectedQuant });
   } catch { /* leave null → don't tag anything */ }
-  const notInstalled = (l) => Array.isArray(installed) && !installed.includes(l);
-  const gb = quantGb(currentQuant);
+  // Polling and selection changes can rebuild concurrently. Never let a result
+  // fetched for an older size overwrite the latest selection.
+  if (revision !== langOptionsRevision || selectedQuant !== currentQuant) return false;
+  const availabilityKnown = Array.isArray(installed);
+  const notInstalled = (l) => availabilityKnown && !installed.includes(l);
+  const gb = quantGb(selectedQuant);
   const sel = el("lang");
   const keep = sel.value;
   sel.innerHTML = "";
@@ -131,17 +192,28 @@ async function rebuildLangOptions() {
     const name = LANG_NAMES[l] || l;
     const opt = document.createElement("option");
     opt.value = l;
-    // Don't tag the language you're currently using — it's loaded and usable even
-    // if its model at the selected detail isn't downloaded.
-    opt.textContent = notInstalled(l) && l !== currentLang ? `${name}  ⬇ ${gb} GB` : name;
+    const targetDiffers = currentLang !== loadedLang || selectedQuant !== loadedQuant;
+    const activeSize = l === loadedLang && loadedQuant && targetDiffers
+      ? ` · ${quantLabel(loadedQuant)} active`
+      : "";
+    // Availability always describes the selected size. An older loaded size can
+    // keep speaking, but must not make a missing selected-size model look present.
+    opt.textContent = !availabilityKnown
+      ? `${name}${activeSize} · availability unknown`
+      : notInstalled(l)
+        ? `${name}${activeSize}  ⬇ ${gb} GB`
+        : `${name}${activeSize}`;
     sel.appendChild(opt);
   }
-  if (keep) sel.value = keep;
+  if (keep && availableLangs.includes(keep)) sel.value = keep;
+  else if (availableLangs.includes(currentLang)) sel.value = currentLang;
+  return true;
 }
 
-// Populate the language dropdown (only languages with voices), select the given
-// one (the loaded model's language), and fill the matching voices.
+// Populate the language dropdown (only languages with voices), select the
+// loaded language or initial locale preference, and fill the matching voices.
 async function setupLangAndVoices(voices, preferred) {
+  const revision = selectionRevision;
   allVoices = voices;
   availableLangs = LANG_ORDER.filter((l) => voices.some((v) => langForVoice(v) === l));
   currentLang =
@@ -149,6 +221,7 @@ async function setupLangAndVoices(voices, preferred) {
       ? preferred
       : availableLangs.includes("en") ? "en" : availableLangs[0];
   await rebuildLangOptions();
+  if (revision !== selectionRevision || pendingAction || probingSelection || switchingLang) return;
   el("lang").value = currentLang;
   localStorage.setItem("pet.lang", currentLang);
   fillVoiceOptions(currentLang);
@@ -161,37 +234,378 @@ function syncVoiceToPet(greet) {
   if (v) emitTo("main", "ui:voice", { voice: v, greet }).catch(() => {});
 }
 
-// The app itself spawns llama-server + Orpheus-FastAPI (src-tauri/src/stack.rs).
-// The model load takes a few seconds, so poll until the engine answers.
-async function populateVoices() {
-  setStatus("starting voice engine…", "busy");
-  const deadline = Date.now() + 150_000;
-  while (Date.now() < deadline) {
-    const { ok, voices } = await getVoices();
-    if (ok) {
-      await setupLangAndVoices(voices, await currentLangFromBackend());
-      setStatus("idle");
-      syncVoiceToPet(false);
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 2500));
+// /voices only proves that the lightweight FastAPI process is listening. It can
+// answer while llama-server or its model is absent, so stack_status is the sole
+// source of truth for whether speech may run.
+function normalizeStackStatus(raw, model) {
+  raw = raw && typeof raw === "object" ? raw : {};
+  const notes = Array.isArray(raw.notes) ? raw.notes.map(String) : [];
+  const configReady = raw.configReady ?? !notes.some((n) => /config error/i.test(n));
+  const runtimePresent = raw.runtimePresent ?? true;
+  const backendPresent = raw.backendPresent ?? true;
+  const backendReady = raw.backendReady ?? raw.orpheusUp ?? false;
+  const llamaReady = raw.llamaReady ?? raw.llamaUp ?? false;
+  const llamaReused = !!raw.llamaReused;
+  const portConflict = !!(raw.portConflict?.llama || raw.portConflict?.backend);
+  const modelPresent = raw.modelPresent ?? model?.present ?? false;
+  const ready = raw.ready ?? (backendReady && llamaReady && modelPresent);
+  const modelOperation = raw.modelOperation || null;
+  const modelOperationActive = typeof modelOperation === "object"
+    ? !!modelOperation?.active
+    : !!modelOperation;
+
+  let state = raw.state;
+  if (!state) {
+    if (!configReady) state = "config-error";
+    else if (!runtimePresent) state = "runtime-missing";
+    else if (!backendPresent) state = "backend-missing";
+    else if (portConflict) state = "port-conflict";
+    else if (!modelPresent) state = "model-missing";
+    else if (!backendReady) state = "starting-backend";
+    else if (!llamaReady) state = "loading-model";
+    else state = ready ? "ready" : "error";
   }
-  const { voices } = await getVoices(); // falls back to the built-in list
-  await setupLangAndVoices(voices, await currentLangFromBackend());
-  setStatus("engine offline", "error");
-  syncVoiceToPet(false);
+  return {
+    ...raw,
+    configReady,
+    runtimePresent,
+    backendPresent,
+    backendReady,
+    llamaReady,
+    llamaReused,
+    portConflict: raw.portConflict || { llama: false, backend: false },
+    modelPresent,
+    modelOperation,
+    modelOperationActive,
+    preferredQuant: raw.preferredQuant || null,
+    loadedQuant: raw.loadedQuant || null,
+    ready: !!ready && state === "ready",
+    state,
+    notes,
+    modelSizeBytes: Number(model?.sizeBytes || 0),
+  };
+}
+
+function setupCopy(stack) {
+  const operation = stack.modelOperation?.active ? stack.modelOperation : null;
+  const displayLang = operation?.targetLanguage || currentLang;
+  const displayQuant = operation?.targetQuant || currentQuant;
+  const langName = LANG_NAMES[displayLang] || displayLang || "voice";
+  const modelBytes = stack.modelSizeBytes || QUANT_BYTES[displayQuant] || QUANT_BYTES.Q8_0;
+  const gb = (modelBytes / 1e9).toFixed(1);
+  const stateAge = stack.state === currentStackState ? Date.now() - readinessStateSince : 0;
+  const canRetryModel = stack.configReady && stack.runtimePresent && stack.backendPresent;
+  const modelRecoveryState = ["model-missing", "loading-model", "error"].includes(stack.state);
+  const runtimeRecoveryState = ["runtime-missing", "backend-missing", "runtime-installing"].includes(stack.state);
+  if (operationError && (
+    operationRetryKind === "retry" ||
+    (operationRetryKind === "runtime" && runtimeRecoveryState) ||
+    (canRetryModel && modelRecoveryState)
+  )) {
+    const retryName = LANG_NAMES[retryLanguage] || retryLanguage || langName;
+    const retryLabel = operationRetryKind === "model"
+      ? `Try ${retryName} again`
+      : operationRetryKind === "quant"
+        ? `Try ${quantLabel(retryQuant)} again`
+        : operationRetryKind === "runtime"
+          ? "Try runtime install again"
+          : "Restart again";
+    return {
+      title: "Speech setup failed",
+      message: operationError,
+      hint: "Try again; if it still fails, restart Orpheus Pet and inspect its log directory.",
+      action: operationRetryKind,
+      actionLabel: retryLabel,
+      autoOpen: true,
+      kind: "error",
+    };
+  }
+  switch (stack.state) {
+    case "config-error":
+      return {
+        title: "Configuration needs repair",
+        message: "The speech stack configuration could not be loaded.",
+        hint: "Restart the app. From source, rerun the setup script if this persists.",
+        action: "retry",
+        actionLabel: "Check again",
+        autoOpen: true,
+        kind: "error",
+      };
+    case "runtime-missing":
+    case "backend-missing": {
+      const canInstall = !!runtimeInstallPlan?.available;
+      const canRetryInstall = !!runtimeInstallPlan?.error &&
+        !/disabled in development/i.test(runtimeInstallPlan.error);
+      const flavor = runtimeInstallPlan?.flavor === "cpu" ? "CPU" : "NVIDIA GPU";
+      const size = runtimeInstallPlan?.approximateBytes
+        ? ` (~${(Number(runtimeInstallPlan.approximateBytes) / 1e9).toFixed(1)} GB)`
+        : "";
+      return {
+        title: "Runtime pack not installed",
+        message: "Orpheus needs its local speech runtime before it can talk.",
+        hint: canInstall
+          ? `Install the verified ${flavor} runtime once${size}; voice models remain separate.`
+          : "From source, run the project setup script. Release builds can install the runtime here once its asset is published.",
+        action: canInstall || canRetryInstall ? "runtime" : "retry",
+        actionLabel: canInstall
+          ? `Install ${flavor} runtime`
+          : canRetryInstall ? "Check runtime download" : "Check again",
+        autoOpen: true,
+        kind: canInstall ? "warn" : "error",
+      };
+    }
+    case "runtime-installing":
+      return {
+        title: "Installing speech runtime",
+        message: "Downloading and verifying the local speech engine…",
+        hint: "The app verifies every file before activating it.",
+        action: null,
+        actionLabel: "",
+        autoOpen: true,
+        kind: "busy",
+      };
+    case "port-conflict": {
+      const ports = [];
+      if (stack.portConflict?.llama) ports.push(stack.ports?.llama || 1234);
+      if (stack.portConflict?.backend) ports.push(stack.ports?.backend || 5005);
+      return {
+        title: "Speech port is already in use",
+        message: `Another process is blocking local speech${ports.length ? ` on port ${ports.join(" / ")}` : ""}.`,
+        hint: "Close that process, then retry. Orpheus will only reuse a service that passes its health check.",
+        action: "retry",
+        actionLabel: "Check again",
+        autoOpen: true,
+        kind: "error",
+      };
+    }
+    case "model-missing":
+      return {
+        title: "One download to start",
+        message: `Download the ${langName} voice model (~${gb} GB).`,
+        hint: "You can choose a smaller model size below before downloading.",
+        action: "model",
+        actionLabel: `Download ${langName}`,
+        autoOpen: true,
+        kind: "warn",
+      };
+    case "loading-model":
+      return {
+        title: stateAge > 150_000 ? "Voice model needs attention" : "Loading voice model",
+        message: stateAge > 150_000
+          ? `${langName} is taking longer than expected to load.`
+          : `${langName} is being prepared for speech.`,
+        hint: stateAge > 150_000
+          ? "Try again, then restart the app or check llama-server.log."
+          : "This can take a minute on the first launch.",
+        action: stateAge > 150_000 ? "retry" : null,
+        actionLabel: "Try again",
+        autoOpen: stateAge > 150_000,
+        kind: stateAge > 150_000 ? "error" : "busy",
+      };
+    case "starting-backend": {
+      // The backend's first import may populate its local decoder cache, so give
+      // it the same generous window as a model load before declaring recovery.
+      const timedOut = stateAge > 150_000;
+      return {
+        title: timedOut ? "Speech backend needs attention" : "Starting speech engine",
+        message: timedOut
+          ? "The local speech backend is taking longer than expected."
+          : "The local speech services are starting…",
+        hint: timedOut ? "Restart the app; from source, rerun setup if this persists." : "This usually takes a few seconds.",
+        action: timedOut ? "retry" : null,
+        actionLabel: "Try again",
+        autoOpen: timedOut,
+        kind: timedOut ? "error" : "busy",
+      };
+    }
+    default:
+      return {
+        title: "Speech engine unavailable",
+        message: "Orpheus could not finish starting its local speech services.",
+        hint: "Try again, then restart the app or check the logs if it still fails.",
+        action: "retry",
+        actionLabel: "Try again",
+        autoOpen: true,
+        kind: "error",
+      };
+  }
+}
+
+let setupActionKind = "retry";
+let lastReadinessNotice = "";
+
+function setSpeechGate(ready, stack, copy = null) {
+  const wasReady = engineReady;
+  engineReady = !!ready;
+  backendModelOperationActive = !!stack?.modelOperationActive;
+  const hasPortConflict = !!(stack?.portConflict?.llama || stack?.portConflict?.backend);
+  modelManagementReady = !!stack?.configReady && !!stack?.runtimePresent && !!stack?.backendPresent && !hasPortConflict && !stack?.llamaReused;
+  const nextState = stack?.state || (ready ? "ready" : "error");
+  if (nextState !== currentStackState) readinessStateSince = Date.now();
+  currentStackState = nextState;
+  el("speak").disabled = !engineReady || switchingLang || installingRuntime || backendModelOperationActive;
+  el("speak").title = engineReady ? "" : "Finish setup before speaking";
+  updatePickerGate();
+  el("lang").title = stack?.llamaReused
+    ? "The active voice server is externally managed; restart without it to switch models"
+    : "Language";
+
+  const notice = JSON.stringify({
+    ready: engineReady,
+    state: currentStackState,
+    message: copy?.message || "Ready",
+    setupRequired: !!copy?.autoOpen,
+  });
+  let readinessPublish = Promise.resolve();
+  if (notice !== lastReadinessNotice) {
+    lastReadinessNotice = notice;
+    readinessPublish = emitTo("main", "ui:readiness", JSON.parse(notice)).catch(() => {});
+  }
+
+  if (engineReady) {
+    if (!wasReady) setStatus("idle");
+    if (panelState === "setup") setPanelState("idle");
+    return readinessPublish;
+  }
+
+  const c = copy || setupCopy(stack || { state: currentStackState });
+  el("setupTitle").textContent = c.title;
+  el("setupMsg").textContent = c.message;
+  el("setupHint").textContent = c.hint || "";
+  setupActionKind = c.action;
+  el("setupAction").textContent = c.actionLabel || "Check again";
+  el("setupAction").style.display = c.action ? "block" : "none";
+  el("setupAction").disabled = false;
+  if (panelState !== "confirm" && panelState !== "downloading") setPanelState("setup");
+  setStatus(c.message, c.kind);
+  return readinessPublish;
+}
+
+async function refreshLiveVoices(preferred) {
+  const result = await getVoices();
+  // Do not let a late backend response replace a language currently shown in a
+  // confirmation/download flow. Retry after the operation settles instead.
+  if (pendingAction || probingSelection || switchingLang || installingRuntime) return;
+  const revision = selectionRevision;
+  const preferredLang = preferred || await currentLangFromBackend();
+  if (revision !== selectionRevision || pendingAction || probingSelection || switchingLang) return;
+  voicesAreLive = result.ok;
+  await setupLangAndVoices(result.voices, preferredLang);
+  if (revision !== selectionRevision || pendingAction || probingSelection || switchingLang) return;
+  if (!hasStagedModelSelection()) syncVoiceToPet(false);
+}
+
+function applyAuthoritativeModelState(state, { preserveSelection = false } = {}) {
+  if (!state || typeof state !== "object") return;
+  if (Object.prototype.hasOwnProperty.call(state, "loadedQuant") && state.loadedQuant !== undefined) {
+    loadedQuant = state.loadedQuant || null;
+  }
+  if (Object.prototype.hasOwnProperty.call(state, "language")) {
+    if (state.language && availableLangs.includes(state.language)) loadedLang = state.language;
+    else if (state.language == null && state.modelPresent === false) {
+      loadedLang = null;
+      loadedQuant = null;
+    }
+  }
+  if (!preserveSelection && state.preferredQuant) {
+    currentQuant = state.preferredQuant;
+    localStorage.setItem("pet.quant", currentQuant);
+    ensureQuantOption(currentQuant);
+    el("quality").value = currentQuant;
+  }
+  if (!preserveSelection && loadedLang) {
+    currentLang = loadedLang;
+    el("lang").value = currentLang;
+    fillVoiceOptions(currentLang);
+    localStorage.setItem("pet.lang", currentLang);
+  }
+}
+
+async function refreshReadiness() {
+  const revision = ++readinessRevision;
+  let raw;
   try {
-    console.warn("stack status:", await invoke("stack_status"));
-  } catch { /* command unavailable */ }
+    raw = await invoke("stack_status");
+  } catch (error) {
+    if (revision !== readinessRevision) return;
+    console.warn("stack status unavailable:", error);
+    const stack = normalizeStackStatus({ state: "error" }, { present: false });
+    await setSpeechGate(false, stack, setupCopy(stack));
+    return;
+  }
+
+  const backendLang = raw?.currentLanguage || await currentLangFromBackend();
+  if (revision !== readinessRevision) return;
+  const preservePendingSelection = !!pendingAction || probingSelection || switchingLang;
+  applyAuthoritativeModelState({
+    language: raw?.modelPresent === false ? null : (raw?.currentLanguage ?? null),
+    preferredQuant: raw?.preferredQuant,
+    loadedQuant: raw?.loadedQuant,
+    modelPresent: raw?.modelPresent,
+  }, { preserveSelection: preservePendingSelection });
+  if (!preservePendingSelection && backendLang && availableLangs.includes(backendLang) && backendLang !== currentLang) {
+    currentLang = backendLang;
+    el("lang").value = backendLang;
+    fillVoiceOptions(backendLang);
+  }
+  let model = null;
+  try { model = await invoke("model_status", { lang: currentLang, quant: currentQuant }); }
+  catch { /* expanded stack_status already carries modelPresent */ }
+  if (revision !== readinessRevision) return;
+
+  const stack = normalizeStackStatus(raw, model);
+  if (
+    ["runtime-missing", "backend-missing"].includes(stack.state) &&
+    !runtimeInstallPlan &&
+    !runtimeInstallPlanLoading
+  ) {
+    runtimeInstallPlanLoading = true;
+    loadRuntimeInstallPlan({ refresh: true }).finally(() => {
+      runtimeInstallPlanLoading = false;
+    });
+  }
+  if (stack.backendReady && !voicesAreLive && !preservePendingSelection) {
+    try { await refreshLiveVoices(backendLang); }
+    catch { /* the built-in voice list remains usable for setup */ }
+    if (revision !== readinessRevision) return;
+  }
+  const operationActive = switchingLang || installingRuntime || stack.modelOperationActive;
+  if (stack.ready && !operationActive) {
+    await setSpeechGate(true, stack);
+  } else if (operationActive) {
+    const loadingStack = {
+      ...stack,
+      ready: false,
+      state: installingRuntime ? "runtime-installing" : "loading-model",
+    };
+    await setSpeechGate(false, loadingStack, setupCopy(loadingStack));
+  } else {
+    await setSpeechGate(false, stack, setupCopy(stack));
+  }
+  await rebuildLangOptions({ quant: currentQuant });
+}
+
+async function pollReadiness() {
+  await refreshReadiness();
+  clearTimeout(readinessPoll);
+  readinessPoll = window.setTimeout(pollReadiness, engineReady ? 8_000 : 2_500);
+}
+
+async function populateVoices() {
+  setStatus("checking speech engine…", "busy");
+  await refreshLiveVoices(await currentLangFromBackend());
+  pollReadiness();
 }
 
 // Panel sub-states: idle (text box + Speak) / download-confirm / download-progress.
 // The confirm and progress UIs take over the text box + Speak space; the pickers
 // stay put above them.
 function setPanelState(state) {
+  panelState = state;
   const idle = state === "idle";
   el("text").style.display = idle ? "block" : "none";
   el("speakRow").style.display = idle ? "flex" : "none";
+  el("setupRow").style.display = state === "setup" ? "flex" : "none";
   el("confirmRow").style.display = state === "confirm" ? "flex" : "none";
   el("dlRow").style.display = state === "downloading" ? "flex" : "none";
 }
@@ -202,135 +616,287 @@ function setDownloadProgress(pct, label) {
   if (l && label) l.textContent = label;
 }
 
-// When a switch needs a download we show a confirm first; these hold the action
-// to run on "Download" and how to revert the dropdown on "Cancel". Shared by the
-// language and model-size flows.
+// A confirmation owns a complete, versioned operation. Keeping the action and
+// revert together prevents a late availability probe from pairing a new label
+// with an older callback.
 let pendingAction = null;
-let pendingRevert = null;
 
-// Re-sync the dropdowns to the model the engine actually has loaded. Used after a
-// cancelled or failed switch so the UI never claims a language/size the backend
-// isn't in (setting .value programmatically doesn't fire the change listeners).
-async function syncActiveState() {
-  try {
-    const lang = await invoke("get_language");
-    if (lang) {
-      currentLang = lang;
-      el("lang").value = lang;
-      fillVoiceOptions(lang);
-    }
-  } catch { /* backend unavailable — leave as-is */ }
-  try {
-    const quant = await invoke("get_quant");
-    if (quant) {
-      currentQuant = quant;
-      if ([...el("quality").options].some((o) => o.value === quant)) {
-        el("quality").value = quant;
-      }
-    }
-  } catch { /* backend unavailable */ }
-  await rebuildLangOptions();
+function setPendingConfirmation(pending, message, buttonLabel = "Download") {
+  pendingAction = pending;
+  el("confirmDl").textContent = buttonLabel;
+  el("confirmMsg").textContent = message;
+  setPanelState("confirm");
+  updatePickerGate();
 }
 
-// Each language is a SEPARATE Orpheus model. If it isn't downloaded yet, confirm
-// the download first; otherwise switch straight away.
-async function onLangChange(target) {
-  if (switchingLang || target === currentLang) return;
-  const prev = currentLang;
-  let status;
+async function clearPendingConfirmation({ revert = false } = {}) {
+  const pending = pendingAction;
+  pendingAction = null;
+  selectionRevision += 1;
+  probingSelection = false;
+  if (revert && pending?.revert) await pending.revert();
+  updatePickerGate();
+}
+
+async function loadRuntimeInstallPlan({ refresh = false } = {}) {
   try {
-    status = await invoke("model_status", { lang: target });
-  } catch {
-    status = { present: true }; // assume present if the check fails
+    runtimeInstallPlan = await invoke("runtime_install_plan");
+  } catch (error) {
+    runtimeInstallPlan = { available: false, error: String(error?.message || error) };
   }
-  if (status.present) {
-    doSwitch(target);
+  if (refresh && ["runtime-missing", "backend-missing"].includes(currentStackState)) {
+    await refreshReadiness();
+  }
+  return runtimeInstallPlan;
+}
+
+async function requestRuntimeInstall() {
+  if (!runtimeInstallPlan?.available) await loadRuntimeInstallPlan();
+  if (!runtimeInstallPlan?.available) {
+    operationError = `Runtime download isn't available: ${String(runtimeInstallPlan?.error || "release asset not found").slice(0, 120)}`;
+    operationRetryKind = "runtime";
+    await refreshReadiness();
     return;
   }
-  const gb = (Number(status.sizeBytes || 0) / 1e9).toFixed(1);
-  pendingAction = () => doSwitch(target);
-  pendingRevert = () => { el("lang").value = prev; };
-  el("confirmMsg").textContent =
-    `Download the ${LANG_NAMES[target] || target} model (~${gb} GB)?`;
-  setPanelState("confirm");
+  const flavor = runtimeInstallPlan.flavor === "cpu" ? "CPU" : "NVIDIA GPU";
+  const size = runtimeInstallPlan.approximateBytes
+    ? ` (~${(Number(runtimeInstallPlan.approximateBytes) / 1e9).toFixed(1)} GB)`
+    : "";
+  setPendingConfirmation({
+    id: newOperationId("runtime-confirm"),
+    kind: "runtime",
+    run: doInstallRuntime,
+  }, `Download and install the verified ${flavor} speech runtime${size}?`, "Install");
 }
 
-// Download (if needed) + hot-swap to `target`, gating the pet's speech while it
-// happens; on failure or cancel, resync the dropdowns to the loaded model.
-async function doSwitch(target) {
-  if (switchingLang) return;
+async function doInstallRuntime() {
+  if (installingRuntime) return;
+  installingRuntime = true;
   switchingLang = true;
-  emitTo("main", "ui:switching", { active: true }).catch(() => {});
-  el("speak").disabled = true;
-  setStatus(`preparing ${LANG_NAMES[target] || target}…`, "busy");
+  operationError = "";
+  operationRetryKind = "runtime";
+  retryLanguage = null;
+  retryQuant = null;
+  const installingStack = { state: "runtime-installing" };
+  setSpeechGate(false, installingStack, setupCopy(installingStack));
+  publishSwitching(true, null);
+  el("stopDl").disabled = false;
+  setPanelState("downloading");
+  setDownloadProgress(0, "Preparing runtime download…");
   try {
-    await invoke("set_language", { lang: target });
-    currentLang = target;
-    localStorage.setItem("pet.lang", target);
-    fillVoiceOptions(target);
-    await rebuildLangOptions(); // the just-installed language loses its download tag
-    const v = el("voice").value;
-    localStorage.setItem("pet.voice", v);
-    setStatus("idle");
-    switchingLang = false;
-    // Ungate the pet BEFORE the greeting, then have it greet in the new voice.
-    emitTo("main", "ui:switching", { active: false }).catch(() => {});
-    emitTo("main", "ui:voice", { voice: v, greet: true }).catch(() => {});
-  } catch (e) {
-    const msg = String(e?.message || e);
-    if (msg.includes("cancelled")) setStatus("download cancelled", "warn");
-    else {
-      console.error(e);
-      setStatus(`couldn't switch: ${msg.slice(0, 46)}`, "error");
+    await invoke("install_runtime");
+    setDownloadProgress(100, "Runtime installed · speech engine starting…");
+  } catch (error) {
+    const message = String(error?.message || error);
+    if (/cancelled/i.test(message)) {
+      setStatus("runtime install cancelled", "warn");
+    } else {
+      operationError = `Couldn't install the speech runtime: ${message.slice(0, 140)}`;
+      operationRetryKind = "runtime";
+      setStatus(operationError, "error");
     }
-    switchingLang = false;
-    emitTo("main", "ui:switching", { active: false }).catch(() => {});
-    await syncActiveState(); // dropdowns back to the model that's actually loaded
   } finally {
+    installingRuntime = false;
+    switchingLang = false;
+    publishSwitching(false, null);
     setPanelState("idle");
-    el("speak").disabled = false;
+    lastReadinessNotice = "";
+    await refreshReadiness();
+    setPanelState(engineReady ? "idle" : "setup");
+    updatePickerGate();
   }
 }
 
-// Detail (model size) is a download PREFERENCE, independent of the current voice.
-// Changing it never downloads: it records the size, refreshes the language list to
-// show that size, and — only if the current language already has that size on disk
-// — hot-swaps to it. Otherwise the current voice keeps playing and the new size
-// applies the next time a language is picked.
-async function onQuantChange(target) {
-  if (switchingLang || target === currentQuant) return;
-  switchingLang = true; // set before the first await so a double-select can't re-enter
-  el("speak").disabled = true;
-  // Will applying this reload the current voice (its model at this size is on
-  // disk) or just set the preference (not downloaded → no reload, no download)?
-  let willLoad = false;
-  try {
-    const st = await invoke("model_status", { lang: currentLang, quant: target });
-    willLoad = !!st.present;
-  } catch { /* treat as preference-only */ }
-  if (willLoad) {
-    emitTo("main", "ui:switching", { active: true }).catch(() => {});
-    setStatus(`switching to ${quantLabel(target)}…`, "busy");
+async function restoreLoadedSelection() {
+  if (loadedLang && availableLangs.includes(loadedLang)) currentLang = loadedLang;
+  if (loadedQuant) currentQuant = loadedQuant;
+  ensureQuantOption(currentQuant);
+  el("lang").value = currentLang;
+  el("quality").value = currentQuant;
+  fillVoiceOptions(currentLang);
+  stagedVoice = null;
+  await rebuildLangOptions({ quant: currentQuant });
+}
+
+// Stage the complete language + size tuple. Every edit updates the same existing
+// confirmation instead of starting work, even when the candidate is on disk.
+async function stageModelSelection({ force = false } = {}) {
+  if (switchingLang || installingRuntime || backendModelOperationActive) return;
+  if (!modelManagementReady) {
+    await restoreLoadedSelection();
+    setPanelState("setup");
+    setStatus("Install or repair the runtime before changing models", "warn");
+    return;
   }
+
+  const targetLang = currentLang;
+  const targetQuant = currentQuant;
+  const differs = targetLang !== loadedLang || targetQuant !== loadedQuant;
+  const revision = ++selectionRevision;
+  if (!force && !differs) {
+    pendingAction = null;
+    probingSelection = false;
+    stagedVoice = null;
+    fillVoiceOptions(currentLang);
+    setPanelState(engineReady ? "idle" : "setup");
+    await rebuildLangOptions({ quant: currentQuant });
+    updatePickerGate();
+    return;
+  }
+
+  probingSelection = true;
+  const pending = {
+    id: newOperationId("selection-confirm"),
+    kind: "model-selection",
+    revision,
+    targetLang,
+    targetQuant,
+    run: () => doModelSwitch(targetLang, targetQuant),
+    revert: restoreLoadedSelection,
+  };
+  setPendingConfirmation(
+    pending,
+    `Checking ${LANG_NAMES[targetLang] || targetLang} · ${quantLabel(targetQuant)}…`,
+    "Checking…",
+  );
+  el("confirmDl").disabled = true;
+
+  const rebuild = rebuildLangOptions({ quant: targetQuant });
+  let status;
   try {
-    await invoke("set_quant", { quant: target });
-    currentQuant = target;
-    localStorage.setItem("pet.quant", target);
-    await rebuildLangOptions(); // language sizes/tags now reflect the new detail
-    setStatus(willLoad ? "idle" : `${quantLabel(target)} — used for new downloads`);
-  } catch (e) {
-    console.error(e);
-    setStatus(`couldn't apply: ${String(e?.message || e).slice(0, 40)}`, "error");
-    await syncActiveState(); // put the dropdowns back to the real state
+    status = await invoke("model_status", { lang: targetLang, quant: targetQuant });
+  } catch {
+    // A failed availability probe must never bypass download consent.
+    status = { present: false, sizeBytes: QUANT_BYTES[targetQuant] };
+  }
+  await rebuild;
+  if (
+    revision !== selectionRevision ||
+    targetLang !== currentLang ||
+    targetQuant !== currentQuant
+  ) return;
+
+  probingSelection = false;
+  const gb = (Number(status.sizeBytes || QUANT_BYTES[targetQuant]) / 1e9).toFixed(1);
+  const name = LANG_NAMES[targetLang] || targetLang;
+  pendingAction = pending;
+  el("confirmDl").textContent = status.present ? "Switch" : "Download & switch";
+  el("confirmDl").disabled = false;
+  el("confirmMsg").textContent = status.present
+    ? `Switch to ${name} · ${quantLabel(targetQuant)}?`
+    : `Download and switch to ${name} · ${quantLabel(targetQuant)} (~${gb} GB)?`;
+  updatePickerGate();
+}
+
+async function onLangChange(target, { force = false } = {}) {
+  if (switchingLang || installingRuntime || backendModelOperationActive) {
+    el("lang").value = currentLang;
+    return;
+  }
+  currentLang = target;
+  fillVoiceOptions(target);
+  stagedVoice = el("voice").value || null;
+  await stageModelSelection({ force });
+}
+
+async function onQuantChange(target, { force = false } = {}) {
+  if (switchingLang || installingRuntime || backendModelOperationActive) {
+    el("quality").value = currentQuant;
+    return;
+  }
+  currentQuant = target;
+  ensureQuantOption(target);
+  el("quality").value = target;
+  await stageModelSelection({ force });
+}
+
+async function doModelSwitch(targetLang, targetQuant) {
+  if (switchingLang || installingRuntime || backendModelOperationActive) return false;
+  const operationId = newOperationId("model");
+  const requestedVoice = stagedVoice || el("voice").value || "";
+  operationError = "";
+  operationRetryKind = "model";
+  retryLanguage = null;
+  retryQuant = null;
+  switchingLang = true;
+  activeOperationId = operationId;
+  probingSelection = false;
+  const loadingStack = {
+    state: "loading-model",
+    modelOperationActive: true,
+    modelOperation: { active: true, targetLanguage: targetLang, targetQuant },
+  };
+  setSpeechGate(false, loadingStack, setupCopy(loadingStack));
+  publishSwitching(true, operationId);
+  setPanelState("downloading");
+  el("stopDl").disabled = false;
+  const targetName = LANG_NAMES[targetLang] || targetLang;
+  setDownloadProgress(0, `Preparing ${targetName} · ${quantLabel(targetQuant)}…`);
+  setStatus(`preparing ${targetName}…`, "busy");
+  let succeeded = false;
+  let selectedVoice = "";
+  try {
+    const result = await invoke("set_model_selection", {
+      lang: targetLang,
+      quant: targetQuant,
+      operationId,
+    });
+    if (!result || result.operationId !== operationId) {
+      throw new Error("speech engine returned a stale model-switch result");
+    }
+    // Rust's result is authoritative, including quant fallback.
+    applyAuthoritativeModelState(result);
+    const resultVoices = voicesForLang(currentLang);
+    selectedVoice = resultVoices.includes(requestedVoice)
+      ? requestedVoice
+      : el("voice").value;
+    if (selectedVoice) {
+      el("voice").value = selectedVoice;
+      localStorage.setItem("pet.voice", selectedVoice);
+    }
+    stagedVoice = null;
+    await rebuildLangOptions({ quant: currentQuant });
+    succeeded = true;
+  } catch (error) {
+    const message = String(error?.message || error);
+    if (/cancelled/i.test(message)) {
+      setStatus("model switch cancelled", "warn");
+    } else {
+      console.error(error);
+      operationError = `Couldn't prepare ${targetName} · ${quantLabel(targetQuant)}: ${message.slice(0, 120)}`;
+      operationRetryKind = "model";
+      retryLanguage = targetLang;
+      retryQuant = targetQuant;
+      setStatus(operationError, "error");
+    }
   } finally {
+    if (activeOperationId === operationId) activeOperationId = null;
     switchingLang = false;
-    el("speak").disabled = false;
-    if (willLoad) emitTo("main", "ui:switching", { active: false }).catch(() => {});
+    publishSwitching(false, operationId);
     setPanelState("idle");
+    lastReadinessNotice = "";
+    await refreshReadiness();
+    stagedVoice = null;
+    setPanelState(engineReady ? "idle" : "setup");
+    updatePickerGate();
+    if (operationError && engineReady) setStatus(operationError, "error");
   }
+  if (succeeded && engineReady && selectedVoice) {
+    emitTo("main", "ui:voice", { voice: selectedVoice, greet: true }).catch(() => {});
+  }
+  return succeeded;
 }
 
 function requestSpeak() {
+  if (!engineReady || hasStagedModelSelection()) {
+    if (hasStagedModelSelection()) {
+      setStatus("Confirm or cancel the staged model first", "warn");
+      return;
+    }
+    setPanelState("setup");
+    setStatus("Finish setup before speaking", "warn");
+    return;
+  }
   const text = el("text").value.trim();
   if (!text) { el("text").focus(); return; }
   emitTo("main", "ui:speak", { text, voice: el("voice").value }).catch(() => {});
@@ -341,25 +907,98 @@ function wireUi() {
   el("hide").addEventListener("click", () => emitTo("main", "ui:hide", {}).catch(() => {}));
   el("voice").addEventListener("change", () => {
     const v = el("voice").value;
+    if (hasStagedModelSelection()) {
+      stagedVoice = v;
+      return;
+    }
     localStorage.setItem("pet.voice", v);
-    syncVoiceToPet(true); // pet says a short hello in the newly picked voice
+    syncVoiceToPet(engineReady); // stay silent until the full stack is ready
   });
   el("lang").addEventListener("change", () => onLangChange(el("lang").value));
   el("quality").addEventListener("change", () => onQuantChange(el("quality").value));
-  el("confirmDl").addEventListener("click", () => {
+  el("confirmDl").addEventListener("click", async () => {
+    const btn = el("confirmDl");
+    const pending = pendingAction;
+    if (!pending) {
+      setPanelState(engineReady ? "idle" : "setup");
+      updatePickerGate();
+      return;
+    }
+    btn.disabled = true;
+    pendingAction = null;
     el("stopDl").disabled = false;
     setPanelState("downloading");
-    setDownloadProgress(0, "Downloading…");
-    if (pendingAction) pendingAction();
+    setDownloadProgress(0, "Preparing…");
+    updatePickerGate();
+    try {
+      const started = await pending.run();
+      if (started === false && !switchingLang && !installingRuntime) {
+        setPanelState(engineReady ? "idle" : "setup");
+      }
+    } catch (error) {
+      operationError = `Couldn't start the operation: ${String(error?.message || error).slice(0, 120)}`;
+      setStatus(operationError, "error");
+      setPanelState(engineReady ? "idle" : "setup");
+    } finally {
+      btn.disabled = false;
+      if (!switchingLang && !installingRuntime && panelState === "downloading") {
+        setPanelState(engineReady ? "idle" : "setup");
+      }
+      updatePickerGate();
+    }
   });
-  el("confirmCancel").addEventListener("click", () => {
-    if (pendingRevert) pendingRevert(); // undo the dropdown change
-    setPanelState("idle");
+  el("confirmCancel").addEventListener("click", async () => {
+    await clearPendingConfirmation({ revert: true });
+    setPanelState(engineReady ? "idle" : "setup");
+    updatePickerGate();
   });
-  el("stopDl").addEventListener("click", () => {
+  el("setupAction").addEventListener("click", async () => {
+    const btn = el("setupAction");
+    if (setupActionKind === "model" || setupActionKind === "quant") {
+      currentLang = retryLanguage || loadedLang || currentLang;
+      currentQuant = retryQuant || loadedQuant || currentQuant;
+      ensureQuantOption(currentQuant);
+      el("lang").value = currentLang;
+      el("quality").value = currentQuant;
+      fillVoiceOptions(currentLang);
+      stagedVoice = el("voice").value || null;
+      operationError = "";
+      retryLanguage = null;
+      retryQuant = null;
+      await stageModelSelection({ force: true });
+      return;
+    }
+    if (setupActionKind === "runtime") {
+      operationError = "";
+      await requestRuntimeInstall();
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "Restarting…";
+    operationError = "";
+    operationRetryKind = "retry";
+    retryLanguage = null;
+    retryQuant = null;
+    readinessStateSince = Date.now();
+    try {
+      await invoke("restart_stack");
+    } catch (error) {
+      operationError = `Couldn't restart the speech stack: ${String(error?.message || error).slice(0, 120)}`;
+      operationRetryKind = "retry";
+    }
+    lastReadinessNotice = "";
+    await refreshReadiness();
+    if (!engineReady) btn.disabled = false;
+  });
+  el("stopDl").addEventListener("click", async () => {
     el("stopDl").disabled = true;
     el("dlLabel").textContent = "stopping…";
-    invoke("cancel_download").catch(() => {});
+    try {
+      const stopped = installingRuntime
+        ? await invoke("cancel_runtime_install")
+        : await invoke("cancel_download");
+      if (!stopped) el("dlLabel").textContent = "Finishing the current load…";
+    } catch { /* the operation's own result will surface the failure */ }
   });
 
   el("text").addEventListener("keydown", (e) => {
@@ -462,8 +1101,10 @@ async function initHotkeyUi() {
       setStatus("hotkey updated", "warn");
     } catch (err) {
       console.error(err);
+      try { current = await invoke("get_hotkey"); }
+      catch { /* retain the last confirmed shortcut */ }
       btn.textContent = comboToLabel(current);
-      setStatus("that combo isn't supported", "error");
+      setStatus(`hotkey wasn't changed: ${String(err?.message || err).slice(0, 70)}`, "error");
     }
   };
 
@@ -485,6 +1126,7 @@ async function initHotkeyUi() {
 async function initQuantUi() {
   const sel = el("quality");
   if (!sel) return;
+  const revision = selectionRevision;
   // Populate synchronously from the presets so the dropdown is usable immediately
   // (currentQuant is already seeded from localStorage).
   sel.innerHTML = "";
@@ -498,7 +1140,7 @@ async function initQuantUi() {
   // Then refine from the backend (authoritative). Keep the seeded value if it fails.
   try {
     const q = await invoke("get_quant");
-    if (q) {
+    if (q && revision === selectionRevision && !pendingAction && !switchingLang && !probingSelection) {
       currentQuant = q;
       // A config quant outside our presets (e.g. Q5_K_M) still shows honestly.
       if (!QUANTS.some((x) => x.id === q)) {
@@ -508,6 +1150,7 @@ async function initQuantUi() {
         sel.appendChild(opt);
       }
       sel.value = q;
+      await rebuildLangOptions({ quant: q });
     }
   } catch { /* keep the seeded value */ }
 }
@@ -520,39 +1163,82 @@ async function main() {
   // slower than this get_quant, so the size tags render correctly regardless.
   initQuantUi();
 
-  // Focus the text box whenever the panel gains focus (the pet focuses this
-  // window when it opens the panel).
+  const focusPrimaryControl = () => {
+    if (panelState === "setup" && setupActionKind) el("setupAction").focus();
+    else if (panelState === "idle") el("text").focus();
+  };
+
+  // Focus the useful control for the current state when the pet opens us.
   win.onFocusChanged(({ payload }) => {
-    if (payload) el("text").focus();
+    if (payload) focusPrimaryControl();
   }).catch(() => {});
 
   // Status updates from the pet (thinking / speaking / errors).
   await listen("pet:status", (e) => {
+    if (!engineReady) return; // setup diagnostics stay visible while speech is gated
     const p = e.payload || {};
     setStatus(p.text, p.kind);
   });
-  // The pet just opened us → focus the text box.
-  await listen("pet:panel-open", () => el("text").focus());
-  // The pet (re)connected → resync the active voice so it can speak samples.
+  // The pet just opened us → focus the primary control for this state.
+  await listen("pet:panel-open", focusPrimaryControl);
+  // The renderer (re)connected → resync and republish readiness. `pet:ready`
+  // deliberately does not mean the speech engine itself is ready.
   await listen("pet:ready", () => {
-    if (allVoices.length) syncVoiceToPet(false);
+    if (allVoices.length && !hasStagedModelSelection()) syncVoiceToPet(false);
+    // The panel can finish first while hidden; force this snapshot to be sent
+    // again after the pet confirms its listener is installed.
+    lastReadinessNotice = "";
+    refreshReadiness();
   });
 
   // Model download / load progress → the in-panel progress bar (the pet shows
   // the cauldron from the same event).
   await listen("model-progress", (e) => {
     const p = e.payload || {};
+    if (!activeOperationId || p.operationId !== activeOperationId) return;
     const name = LANG_NAMES[p.lang] || p.lang || "";
     const gb = (n) => (Number(n || 0) / 1e9).toFixed(1);
     if (p.phase === "download") {
+      const loadingStack = {
+        state: "loading-model",
+        modelOperation: { active: true, targetLanguage: p.lang, targetQuant: p.quant },
+      };
+      setSpeechGate(false, loadingStack, setupCopy(loadingStack));
       const pct = p.pct ?? 0;
       setPanelState("downloading");
       const detail = p.total ? `${pct}% · ${gb(p.received)}/${gb(p.total)} GB` : `${gb(p.received)} GB`;
       setDownloadProgress(pct, `Downloading ${name} · ${detail}`);
     } else if (p.phase === "loading") {
+      const loadingStack = {
+        state: "loading-model",
+        modelOperation: { active: true, targetLanguage: p.lang, targetQuant: p.quant },
+      };
+      setSpeechGate(false, loadingStack, setupCopy(loadingStack));
       setPanelState("downloading");
       setDownloadProgress(100, `Loading ${name} model…`);
-      el("stopDl").disabled = true; // download's done; nothing left to stop
+      // Rust can still cancel a slow load and restore the previous model until
+      // it reaches the short commit boundary, so keep that escape hatch live.
+      el("stopDl").disabled = false;
+    } else if (p.phase === "ready") {
+      setDownloadProgress(100, `${name} ${p.quant || ""} ready`.replace(/\s+/g, " ").trim());
+      el("stopDl").disabled = true;
+    } else if (["failed", "error"].includes(p.phase)) {
+      setDownloadProgress(Number(p.pct || 0), p.message || `Couldn't load ${name}`);
+      el("stopDl").disabled = true;
+    } else if (p.phase === "cancelled") {
+      setDownloadProgress(Number(p.pct || 0), `${name} download cancelled`);
+      el("stopDl").disabled = true;
+    }
+  });
+
+  await listen("runtime-progress", (e) => {
+    if (!installingRuntime) return;
+    const p = e.payload || {};
+    const pct = Number(p.pct ?? 0);
+    setPanelState("downloading");
+    setDownloadProgress(pct, p.message || "Installing speech runtime…");
+    if (["activating", "restarting", "ready"].includes(p.phase)) {
+      el("stopDl").disabled = true;
     }
   });
 

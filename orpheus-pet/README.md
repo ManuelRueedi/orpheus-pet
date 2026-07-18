@@ -59,19 +59,23 @@ Quit from the tray (or `taskkill` llama-server/python) for a full teardown.
 
 Each Orpheus language is a **separate ~3.5 GB fine-tuned model** (the base model
 is English-only), loaded one at a time. The panel's **Language** dropdown lists
-all supported languages (EN/FR/DE/ES/IT/KO/HI/ZH). Picking one whose model isn't
-downloaded yet **asks you to confirm the ~3.5 GB download**; then the picker area
-becomes an in-panel **progress bar + Stop button** (with a filling cauldron over
-the witch) while it fetches from `huggingface.co/lex-au/<model>` and hot-swaps
-llama-server. **Stop** cancels the download. Downloaded models are cached and the
-choice persists across restarts. Spanish & Italian share one model (instant
-switch). Managed in [`src-tauri/src/stack.rs`](src-tauri/src/stack.rs)
-(`set_language` / `model_status` / `cancel_download`).
+all supported languages (EN/FR/DE/ES/IT/KO/HI/ZH). Language and model size are
+staged together: change either dropdown in any order, then press **Switch** or
+**Download & switch** once the final pair is right. Only that pair is loaded or
+downloaded. The picker area then becomes an in-panel **progress bar + Stop
+button** (with a filling cauldron over the witch) while it fetches from
+`huggingface.co/lex-au/<model>` and hot-swaps llama-server. **Stop** cancels the
+operation and restores the previous model when loading already began. Downloaded
+models are cached and the successful pair persists across restarts. Spanish &
+Italian share one model (instant switch). Managed in
+[`src-tauri/src/stack.rs`](src-tauri/src/stack.rs) (`set_model_selection` /
+`model_status` / `cancel_download`).
 
 ## Read anything aloud — global hotkey
 
-Highlight text in **any** app and press **Ctrl+Alt+A** (default). The witch pops
-up and reads the selection in the current voice.
+Highlight text in **any** app and press **Ctrl+Alt+A** (default). The witch reads
+the selection in the current voice. When her window is hidden in the tray, the
+shortcut keeps it hidden and plays the speech in the background.
 
 **Change it in the panel:** open the panel (right-click the witch), click the
 hotkey button next to "Read-aloud hotkey", and press your combo — it re-registers

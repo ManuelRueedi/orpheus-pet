@@ -256,7 +256,18 @@ html, body {
 .btn.primary:disabled { opacity: 0.5; cursor: default; }
 .btn.ghost { background: transparent; width: 32px; padding: 7px 0; }
 
-/* Download confirm + progress (take over the text box + Speak space while busy) */
+/* First-run setup, download confirm, and progress take over the text box area. */
+.setup-block { display: flex; flex-direction: column; gap: 4px; }
+.setup-title { font-size: 13px; color: #fff; }
+.setup-msg { font-size: 13px; line-height: 1.3; }
+.setup-hint {
+  min-height: 15px;
+  color: #bcb1d8;
+  font-size: 11px;
+  line-height: 1.25;
+}
+.setup-actions { margin-top: 2px; }
+.setup-actions .btn { padding-top: 6px; padding-bottom: 6px; }
 .confirm-block { display: flex; flex-direction: column; gap: 8px; }
 .confirm-msg { font-size: 13px; line-height: 1.35; }
 .confirm-actions { gap: 8px; }

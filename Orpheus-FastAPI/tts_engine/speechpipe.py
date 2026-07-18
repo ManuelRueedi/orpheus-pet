@@ -37,7 +37,16 @@ try:
 except:
     pass
 
-model = SNAC.from_pretrained("hubertsiuzdak/snac_24khz").eval()
+# Release packs set a local model directory so backend import never hides a
+# first-run download; source development keeps SNAC's usual Hub fallback.
+packaged_snac_model = os.environ.get("ORPHEUS_SNAC_MODEL")
+snac_model_id = packaged_snac_model or "hubertsiuzdak/snac_24khz"
+snac_load_options = {}
+if os.environ.get("ORPHEUS_SNAC_REVISION"):
+    snac_load_options["revision"] = os.environ["ORPHEUS_SNAC_REVISION"]
+if packaged_snac_model or os.environ.get("ORPHEUS_SNAC_LOCAL_ONLY") == "1":
+    snac_load_options["local_files_only"] = True
+model = SNAC.from_pretrained(snac_model_id, **snac_load_options).eval()
 
 # Check if CUDA is available and set device accordingly
 snac_device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"

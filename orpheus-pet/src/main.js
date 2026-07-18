@@ -23,6 +23,9 @@ let lip;
 let speaking = false;
 let paused = false;
 let switchingLang = false; // engine is mid model-swap (synced from the panel)
+let activeModelOperationId = null;
+let engineReady = false;   // full backend + model readiness (synced from stack_status)
+let setupPromptShown = false;
 let currentVoice = "tara"; // synced from the panel; used by autonomous speech
 // Monotonic id per speech request: a newer request invalidates the state
 // updates (status text, cleanup) of any request it cancelled.
@@ -78,7 +81,7 @@ function clearPause() {
 // Synthesize + speak `text` in `voice` (defaults to the current voice). Called
 // by the panel (Speak/hotkey) and by the pet's own autonomous lines.
 async function speak(text, voice) {
-  if (switchingLang) return; // engine is mid model-swap
+  if (switchingLang || !engineReady) return; // never probe a partial stack with synthesis
   text = (typeof text === "string" ? text : "").trim();
   if (!text) return;
   voice = voice || currentVoice || "tara";
@@ -360,11 +363,12 @@ function wireDragAndClick() {
   });
 
   window.addEventListener("mouseup", () => {
-    // A left-click without a drag: pause/resume while she's speaking, or say a
-    // random sample line when idle. (The panel lives on right-click.)
+    // A left-click without a drag: pause/resume while she's speaking, say a
+    // sample when ready, or expose first-run setup when speech is unavailable.
     if (start && !moved) {
       if (speaking) togglePause();
-      else speakSample();
+      else if (engineReady) speakSample();
+      else togglePanel(true);
     }
     start = null;
   });
@@ -470,6 +474,10 @@ async function main() {
 
   // ---- Commands from the panel window ----
   await listen("ui:speak", (e) => {
+    if (!engineReady) {
+      togglePanel(true);
+      return;
+    }
     const p = e.payload || {};
     speak(p.text, p.voice);
   });
@@ -477,10 +485,30 @@ async function main() {
     const p = e.payload || {};
     if (!p.voice) return;
     currentVoice = p.voice;
-    if (p.greet) greetInVoice(p.voice);
+    if (p.greet && engineReady) greetInVoice(p.voice);
+  });
+  await listen("ui:readiness", (e) => {
+    const p = e.payload || {};
+    engineReady = !!p.ready;
+    if (engineReady) {
+      setupPromptShown = false;
+      return;
+    }
+    // Actionable first-run/repair states open once automatically. Ordinary
+    // backend/model startup stays quiet unless it exceeds the panel's grace time.
+    if (p.setupRequired && !setupPromptShown) {
+      setupPromptShown = true;
+      togglePanel(true);
+    }
   });
   await listen("ui:switching", (e) => {
     const p = e.payload || {};
+    const operationId = p.operationId ? String(p.operationId) : null;
+    if (!p.active && operationId && activeModelOperationId && operationId !== activeModelOperationId) {
+      return; // a late completion cannot hide a newer operation's cauldron
+    }
+    if (p.active && operationId) activeModelOperationId = operationId;
+    if (!p.active) activeModelOperationId = null;
     switchingLang = !!p.active;
     if (!p.active) hideCauldron(); // swap finished/failed — put the witch back
   });
@@ -494,12 +522,21 @@ async function main() {
   });
 
   // ---- Events from the Rust side ----
-  // Global hotkey (default Ctrl+Alt+S — see stack.config.json): the Rust side
+  // Global hotkey (default Ctrl+Alt+A — see stack.config.json): the Rust side
   // grabs the text highlighted in whatever app has focus and sends it here.
-  await listen("speak-selection", (e) => {
+  await listen("speak-selection", async (e) => {
     let text = (e.payload || "").trim();
     if (!text) {
       setStatus("no text selected", "warn");
+      return;
+    }
+    if (!engineReady) {
+      // A shortcut must never reveal a pet the user tucked into the tray. If
+      // she is already visible, keep the existing setup-recovery affordance.
+      let visible = false;
+      try { visible = await win.isVisible(); }
+      catch { /* safest fallback is to preserve hidden state */ }
+      if (visible) await togglePanel(true);
       return;
     }
     if (text.length > 1500) {
@@ -513,7 +550,7 @@ async function main() {
   // Hiding also tucks the follower panel away.
   await listen("pet-visibility", async (e) => {
     if (e.payload === "show") {
-      sayHello();
+      if (engineReady) sayHello();
     } else if (e.payload === "hide") {
       await closePanel();
       sayGoodbye();
@@ -523,13 +560,45 @@ async function main() {
   // Model download / load progress while switching languages → cauldron fill.
   await listen("model-progress", (e) => {
     const p = e.payload || {};
-    if (p.phase === "download") {
+    const operationId = p.operationId ? String(p.operationId) : null;
+    const terminal = ["ready", "failed", "cancelled"].includes(p.phase);
+    if (terminal && operationId && !activeModelOperationId) {
+      return; // no matching model operation is visible in this window
+    }
+    if (operationId && activeModelOperationId && operationId !== activeModelOperationId) {
+      return; // queued delivery from an older switch
+    }
+    if (operationId && !terminal) activeModelOperationId = operationId;
+    if (p.phase === "preparing") {
+      showCauldron();
+      setCauldronPct(0, "preparing");
+    } else if (p.phase === "download") {
       showCauldron();
       setCauldronPct(p.pct ?? 0);
     } else if (p.phase === "loading") {
       showCauldron();
       setCauldronPct(100, "brewing");
+    } else if (terminal) {
+      activeModelOperationId = null;
+      switchingLang = false;
+      hideCauldron();
     }
+  });
+
+  // Runtime installation uses the same cauldron, but only after the panel has
+  // obtained explicit download consent and marked the engine as switching.
+  await listen("runtime-progress", (e) => {
+    if (!switchingLang) return;
+    const p = e.payload || {};
+    showCauldron();
+    const label = p.phase?.startsWith("verifying")
+      ? "checking"
+      : p.phase === "extracting" || p.phase === "installing"
+        ? "unpacking"
+        : p.phase === "activating" || p.phase === "restarting"
+          ? "starting"
+          : undefined;
+    setCauldronPct(p.pct ?? 0, label);
   });
 
   // Tell the panel we're ready so it can (re)sync the current voice to us.

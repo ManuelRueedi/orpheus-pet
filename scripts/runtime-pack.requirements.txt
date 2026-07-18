@@ -1,0 +1,2 @@
+# Build-time only. Runtime dependencies come from Orpheus-FastAPI/requirements.txt.
+pyinstaller==6.21.0

@@ -39,6 +39,9 @@ logs/
 *.log
 *.local
 
+# ── Generated release runtime packs (multi-GB; built by scripts/) ──
+artifacts/runtime-packs/
+
 # ── OS / editor cruft ──
 .DS_Store
 Thumbs.db
