@@ -1,0 +1,48 @@
+# ═══════════════════════════════════════════════════════════════════
+#  Orpheus Pet — keep the repo lean 🧹
+#  Weights, binaries, envs and build output are fetched during setup,
+#  never committed. (Full repo on disk is ~23 GB; the source is ~a few MB.)
+# ═══════════════════════════════════════════════════════════════════
+
+# ── Voice models (multi-GB GGUF, downloaded on demand by the app) ──
+models/*
+!models/.gitkeep
+*.gguf
+*.bin
+*.safetensors
+*.pt
+
+# ── llama.cpp binaries (grab a release for your OS/GPU — see README) ──
+llama/*
+!llama/.gitkeep
+
+# ── Python backend (Orpheus-FastAPI) ──
+**/venv/
+**/.venv/
+**/__pycache__/
+*.pyc
+Orpheus-FastAPI/.env
+Orpheus-FastAPI/outputs/*
+!Orpheus-FastAPI/outputs/.gitkeep
+
+# ── Node / Vite / Tauri build output ──
+**/node_modules/
+orpheus-pet/dist/
+orpheus-pet/src-tauri/target/
+orpheus-pet/src-tauri/gen/
+
+# ── Machine-specific config (copy stack.config.example.json → stack.config.json) ──
+orpheus-pet/stack.config.json
+
+# ── Logs & scratch ──
+logs/
+*.log
+*.local
+
+# ── OS / editor cruft ──
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+**/.vscode/*
+!**/.vscode/extensions.json

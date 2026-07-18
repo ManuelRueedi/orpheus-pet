@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <title>Orpheus Pet — Controls</title>
+  </head>
+  <body class="panel-body">
+    <!-- Speech bubble / control panel. This is its own window; the pet shows,
+         hides, and positions it in the free space beside the witch. -->
+    <section id="panel" class="panel" aria-label="Pet controls">
+      <div id="pickerRows">
+        <div class="panel-row">
+          <select id="lang" title="Language"></select>
+          <span id="status" class="status">idle</span>
+        </div>
+        <div class="panel-row">
+          <select id="voice" title="Voice"></select>
+        </div>
+      </div>
+      <!-- Shown instead of the pickers to confirm a big model download -->
+      <div class="panel-row confirm-row" id="confirmRow" style="display: none">
+        <span id="confirmMsg" class="confirm-msg"></span>
+        <button id="confirmDl" class="btn primary">Download</button>
+        <button id="confirmCancel" class="btn ghost">Cancel</button>
+      </div>
+      <!-- Shown instead of the pickers while downloading a model -->
+      <div class="panel-row dl-row" id="dlRow" style="display: none">
+        <div class="dl-info">
+          <span id="dlLabel">Downloading…</span>
+          <div class="dl-bar"><div id="dlFill"></div></div>
+        </div>
+        <button id="stopDl" class="btn ghost">Stop</button>
+      </div>
+      <textarea id="text" rows="2" placeholder="Tell the witch what to say… (Ctrl+Enter)"></textarea>
+      <div class="panel-row">
+        <button id="speak" class="btn primary">Speak</button>
+        <button id="hide" class="btn ghost" title="Hide to tray">–</button>
+      </div>
+      <div class="panel-row hotkey-row">
+        <span class="hk-label">Read-aloud hotkey</span>
+        <button id="hotkey" class="btn hk-btn" title="Click, then press your shortcut">…</button>
+      </div>
+    </section>
+    <script type="module" src="/src/panel.js"></script>
+  </body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "_comment": "Copy me to stack.config.json, then tweak. Paths may be RELATIVE to this file (orpheus-pet/) or absolute. 'quant' picks the model size — see README 'Lower-spec machines'.",
+  "quant": "Q8_0",
+  "language": "en",
+  "llamaServer": "../llama/llama-server.exe",
+  "model": "../models/Orpheus-3b-FT-Q8_0.gguf",
+  "llamaPort": 1234,
+  "llamaArgs": ["-ngl", "99", "-c", "8192"],
+  "orpheusDir": "../Orpheus-FastAPI",
+  "python": "../Orpheus-FastAPI/venv/Scripts/python.exe",
+  "orpheusPort": 5005,
+  "logsDir": "../logs",
+  "hotkey": "ctrl+alt+KeyA"
+}

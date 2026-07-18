@@ -1,0 +1,17 @@
+# Normalize line endings: LF in the repo, native in each working copy.
+* text=auto eol=lf
+
+# Binary assets — never munge EOLs or try to diff these.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.icns binary
+*.wav  binary
+*.mp3  binary
+*.wasm binary
+*.riv  binary
+*.gguf binary
+*.woff  binary
+*.woff2 binary

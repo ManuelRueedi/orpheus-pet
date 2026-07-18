@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <title>Orpheus Pet</title>
+  </head>
+  <body>
+    <div id="app">
+      <!-- The pet itself: drag to move, click to talk/pause, right-click for
+           the controls panel (which lives in its own window). -->
+      <div id="pet" class="pet" title="Click: talk / pause • right-click: menu • drag to move">
+        <div id="petStage" class="pet-stage"><!-- renderer injects the witch here --></div>
+        <!-- Brewing cauldron shown while a language model downloads/loads.
+             The potion level = download %. -->
+        <div id="cauldron" class="cauldron">
+          <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <clipPath id="potCavity">
+                <path d="M46 92 L154 92 Q154 154 100 166 Q46 154 46 92 Z"/>
+              </clipPath>
+            </defs>
+            <ellipse class="fire" cx="100" cy="184" rx="42" ry="9"/>
+            <path class="pot-body" d="M40 92 Q34 152 64 176 Q100 192 136 176 Q166 152 160 92 Z"/>
+            <g clip-path="url(#potCavity)">
+              <g id="liquid" transform="translate(0 76)">
+                <rect class="potion" x="44" y="90" width="112" height="92"/>
+                <ellipse class="surface" cx="100" cy="92" rx="52" ry="6"/>
+                <circle class="bubble b1" cx="80" cy="146" r="5"/>
+                <circle class="bubble b2" cx="110" cy="152" r="7"/>
+                <circle class="bubble b3" cx="124" cy="146" r="4"/>
+                <circle class="bubble b4" cx="92" cy="156" r="6"/>
+              </g>
+            </g>
+            <ellipse class="rim" cx="100" cy="93" rx="57" ry="12"/>
+            <path class="handle" d="M50 90 Q100 62 150 90"/>
+            <g id="spoon">
+              <rect x="97" y="42" width="6" height="72" rx="3"/>
+              <ellipse cx="100" cy="116" rx="11" ry="6"/>
+            </g>
+            <text id="cauldronPct" x="100" y="138">0%</text>
+          </svg>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

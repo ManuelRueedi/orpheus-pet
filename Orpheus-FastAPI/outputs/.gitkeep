@@ -1,0 +1,1 @@
+# FastAPI writes generated audio here; contents are git-ignored. The folder must exist (StaticFiles mounts it).
