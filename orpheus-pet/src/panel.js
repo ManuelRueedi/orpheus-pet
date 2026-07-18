@@ -11,12 +11,25 @@ import { LINES, VOICE_LANG } from "./pet/samples.js";
 const el = (id) => document.getElementById(id);
 const win = getCurrentWindow();
 
+// Map the pet's (text, kind) status into a visual state + clean label. The dot
+// colour keys off the state class (see .status.state-* in styles.css).
+function statusVisual(text, kind) {
+  const t = (text || "").toLowerCase();
+  if (kind === "error") return { state: "error", label: text || "Something went wrong" };
+  if (t.includes("pause")) return { state: "paused", label: "Paused" };
+  if (kind === "warn") return { state: "warn", label: text };
+  if (t.includes("speak")) return { state: "reading", label: "Reading aloud" };
+  if (kind === "busy") return { state: "thinking", label: text || "Working…" };
+  return { state: "idle", label: !text || t === "idle" ? "Ready" : text };
+}
+
 function setStatus(text, kind = "") {
-  const s = el("status");
-  if (s) {
-    s.textContent = text;
-    s.className = "status " + kind;
-  }
+  const box = el("status");
+  if (!box) return;
+  const { state, label } = statusVisual(text, kind);
+  const t = el("statusText");
+  if (t) t.textContent = label;
+  box.className = "status state-" + state;
 }
 
 const LANG_NAMES = {
@@ -151,7 +164,7 @@ async function populateVoices() {
 
 // Panel sub-states: normal pickers / download-confirm / download-progress.
 function setPanelState(state) {
-  el("pickerRows").style.display = state === "idle" ? "block" : "none";
+  el("pickerRows").style.display = state === "idle" ? "flex" : "none";
   el("confirmRow").style.display = state === "confirm" ? "flex" : "none";
   el("dlRow").style.display = state === "downloading" ? "flex" : "none";
 }

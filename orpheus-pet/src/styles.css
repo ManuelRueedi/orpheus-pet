@@ -200,7 +200,7 @@ html, body {
   color: var(--panel-fg);
   border: 1px solid rgba(168, 85, 247, 0.4);
   border-radius: 16px;
-  padding: 10px;
+  padding: 12px;
   backdrop-filter: blur(8px);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
 }
@@ -252,12 +252,103 @@ html, body {
 .btn.primary:disabled { opacity: 0.5; cursor: default; }
 .btn.ghost { background: transparent; width: 32px; padding: 7px 0; }
 
+/* Download confirm + progress rows (replace the pickers while busy) */
+.confirm-row, .dl-row { align-items: center; gap: 8px; }
+.confirm-msg { font-size: 12.5px; flex: 1; min-width: 0; line-height: 1.3; }
+.dl-info { flex: 1; min-width: 0; }
+#dlLabel { display: block; font-size: 12px; margin-bottom: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dl-bar { height: 8px; background: rgba(255, 255, 255, 0.1); border-radius: 5px; overflow: hidden; }
+#dlFill { height: 100%; width: 0%; background: var(--accent); border-radius: 5px; transition: width 0.2s ease; }
+#stopDl { background: rgba(239, 68, 68, 0.28); }
+#stopDl:hover { background: rgba(239, 68, 68, 0.45); }
+#stopDl:disabled { opacity: 0.5; }
+
+/* ---- Status: state dot + label, minimize control at the far right ---- */
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #cabfe8;
+  padding-bottom: 9px;
+  border-bottom: 1px solid rgba(168, 85, 247, 0.16);
+  min-height: 22px;
+}
+.st-dot {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #6f6890;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+.st-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--panel-fg);
+}
+
+/* Minimize (hide-to-tray) button, pinned top-right. */
+.hide-btn {
+  margin-left: auto;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--panel-fg);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.55;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.hide-btn:hover { opacity: 1; background: rgba(255, 255, 255, 0.12); }
+
+.status.state-idle .st-dot { background: #4ea373; }
+.status.state-reading .st-dot { background: #3fbf6f; box-shadow: 0 0 9px #3fbf6f; }
+.status.state-thinking .st-dot {
+  background: #fbbf24;
+  box-shadow: 0 0 8px rgba(251, 191, 36, 0.55);
+  animation: dotPulse 1s ease-in-out infinite;
+}
+.status.state-paused .st-dot { background: #fbbf24; }
+.status.state-warn .st-dot { background: #fbbf24; }
+.status.state-error .st-dot { background: #f87171; box-shadow: 0 0 8px rgba(248, 113, 113, 0.5); }
+@keyframes dotPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+/* Equalizer — replaces the label while reading (no "Reading aloud" text). */
+.st-eq {
+  display: none;
+  align-items: flex-end;
+  gap: 2.5px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+.st-eq i { width: 3px; height: 4px; border-radius: 2px; background: var(--accent); }
+.status.state-reading .st-text { display: none; }
+.status.state-reading .st-eq { display: inline-flex; }
+.status.state-reading .st-eq i { animation: eq 0.9s ease-in-out infinite; }
+.status.state-reading .st-eq i:nth-child(2) { animation-delay: 0.12s; }
+.status.state-reading .st-eq i:nth-child(3) { animation-delay: 0.24s; }
+.status.state-reading .st-eq i:nth-child(4) { animation-delay: 0.36s; }
+.status.state-reading .st-eq i:nth-child(5) { animation-delay: 0.48s; }
+@keyframes eq { 0%, 100% { height: 4px; } 50% { height: 15px; } }
+
+/* Read-aloud hotkey — just the button (click to rebind), pinned right. */
 .hotkey-row { align-items: center; }
-.hk-label { font-size: 12px; opacity: 0.75; }
 .hk-btn {
   margin-left: auto;
   font-size: 12px;
-  padding: 5px 10px;
+  padding: 5px 12px;
   min-width: 96px;
   text-align: center;
   background: rgba(255, 255, 255, 0.08);
@@ -272,19 +363,3 @@ html, body {
 }
 .hk-btn.saved { border-color: #34d399; }
 @keyframes hkPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
-
-/* Download confirm + progress rows (replace the pickers while busy) */
-.confirm-row, .dl-row { align-items: center; gap: 8px; }
-.confirm-msg { font-size: 12.5px; flex: 1; min-width: 0; line-height: 1.3; }
-.dl-info { flex: 1; min-width: 0; }
-#dlLabel { display: block; font-size: 12px; margin-bottom: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dl-bar { height: 8px; background: rgba(255, 255, 255, 0.1); border-radius: 5px; overflow: hidden; }
-#dlFill { height: 100%; width: 0%; background: var(--accent); border-radius: 5px; transition: width 0.2s ease; }
-#stopDl { background: rgba(239, 68, 68, 0.28); }
-#stopDl:hover { background: rgba(239, 68, 68, 0.45); }
-#stopDl:disabled { opacity: 0.5; }
-
-.status { font-size: 12px; opacity: 0.85; margin-left: auto; }
-.status.busy { color: #fcd34d; }
-.status.error { color: #fca5a5; }
-.status.warn { color: #fdba74; }
