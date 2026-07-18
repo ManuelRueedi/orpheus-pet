@@ -1,5 +1,9 @@
 # Orpheus Pet 🧙‍♀️
 
+<p align="center">
+  <img src="docs/hero.png" alt="Orpheus Pet — a transparent desktop witch that reads highlighted text aloud, with 25 voices across 8 languages, fully local" width="820">
+</p>
+
 A little **witch who lives on your desktop and reads things out loud.** She floats
 on top of everything (transparent, always-on-top), lip-syncs while she talks, and
 sulks with duct tape over her mouth when you pause her. Under the pointy hat is a
