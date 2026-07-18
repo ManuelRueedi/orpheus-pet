@@ -70,12 +70,12 @@ class FallbackRenderer {
   </g>
   <!-- Thought bubble: shown via the .thinking class while the model works -->
   <g id="thoughtBubble">
-    <circle class="tb-trail" cx="62" cy="74" r="4"/>
-    <circle class="tb-trail" cx="52" cy="61" r="6"/>
-    <ellipse class="tb-cloud" cx="38" cy="38" rx="27" ry="20"/>
-    <circle class="tb-dot d1" cx="25" cy="38" r="3.5"/>
-    <circle class="tb-dot d2" cx="38" cy="38" r="3.5"/>
-    <circle class="tb-dot d3" cx="51" cy="38" r="3.5"/>
+    <circle class="tb-trail" cx="73" cy="66" r="3.5"/>
+    <circle class="tb-trail" cx="71" cy="54" r="5"/>
+    <ellipse class="tb-cloud" cx="64" cy="34" rx="21" ry="15"/>
+    <circle class="tb-dot d1" cx="55" cy="35" r="3"/>
+    <circle class="tb-dot d2" cx="64" cy="35" r="3"/>
+    <circle class="tb-dot d3" cx="73" cy="35" r="3"/>
   </g>
 </svg>`;
     this.mouth = this.stage.querySelector("#mouth");
