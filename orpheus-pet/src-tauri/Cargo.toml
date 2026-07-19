@@ -1,6 +1,6 @@
 [package]
 name = "orpheus-pet"
-version = "0.1.4"
+version = "0.1.9"
 description = "Orpheus TTS desktop pet"
 authors = ["you"]
 edition = "2021"
@@ -33,5 +33,9 @@ zip = { version = "4", default-features = false, features = ["deflate-flate2-zli
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
 ] }

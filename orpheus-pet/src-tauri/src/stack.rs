@@ -27,6 +27,8 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::process_control::{recover_orphaned_managed_processes, ProcessContainment};
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -284,6 +286,7 @@ pub struct Stack {
     backend_port_conflict: Mutex<bool>,
     language: Mutex<Option<String>>,
     model_operation: Mutex<ModelOperationState>,
+    process_containment: ProcessContainment,
 }
 
 impl Stack {
@@ -802,6 +805,12 @@ fn spawn_named(
 ) -> Result<(), String> {
     match cmd.spawn() {
         Ok(child) => {
+            if let Err(error) = stack.process_containment.assign(&child) {
+                terminate_child(child);
+                let message = format!("{name}: {error}");
+                notes.push(message.clone());
+                return Err(message);
+            }
             let pid = child.id();
             stack.processes.lock().unwrap().push(NamedProcess {
                 name: name.to_string(),
@@ -850,6 +859,10 @@ fn spawn_llama(stack: &Stack, cfg: &StackConfig, model_path: &Path) -> Result<()
     hidden(&mut cmd);
     match cmd.spawn() {
         Ok(child) => {
+            if let Err(error) = stack.process_containment.assign(&child) {
+                terminate_child(child);
+                return Err(format!("llama-server: {error}"));
+            }
             let mut process = stack.llama_process.lock().unwrap();
             process.child = Some(child);
             process.reused = false;
@@ -1160,6 +1173,14 @@ fn start_inner(app: &AppHandle, stack: &Stack) -> Result<(), String> {
     *stack.cfg_path.lock().unwrap() = Some(cfg_path);
     *stack.runtime.lock().unwrap() = Some(runtime.clone());
 
+    if !cfg!(debug_assertions) && runtime.source == "runtime-pack" {
+        let mut expected = vec![runtime.llama_server.as_path()];
+        if let Some(backend) = runtime.backend_exe.as_deref() {
+            expected.push(backend);
+        }
+        notes.extend(recover_orphaned_managed_processes(&expected));
+    }
+
     // 1. llama-server (GGUF model inference on the GPU)
     if llama_ready(cfg.llama_port) {
         stack.llama_process.lock().unwrap().reused = true;
@@ -1355,6 +1376,16 @@ fn est_size(quant: &str) -> u64 {
     }
 }
 
+// Most language releases share the generic quant estimates, but the English
+// Q8 artifact is materially larger. Using its published byte size prevents the
+// final ~500 MB from looking frozen at 99%.
+fn est_size_for_model(lang: &str, quant: &str) -> u64 {
+    match (lang, quant) {
+        ("en", "Q8_0") => 4_028_683_104,
+        _ => est_size(quant),
+    }
+}
+
 fn lang_for_model_file(name: &str) -> &'static str {
     let n = name.to_lowercase();
     if n.contains("french") {
@@ -1491,7 +1522,7 @@ fn download_model(
     url: &str,
     dest: &Path,
 ) -> Result<(), ModelDownloadError> {
-    let total = est_size(quant);
+    let total = est_size_for_model(lang, quant);
     let part = dest.with_extension("part");
     let _ = fs::remove_file(&part);
     if operation_cancelled(stack) {
@@ -1539,6 +1570,10 @@ fn download_model(
     let child = cmd
         .spawn()
         .map_err(|error| ModelDownloadError::Failed(format!("curl spawn failed: {error}")))?;
+    if let Err(error) = stack.process_containment.assign(&child) {
+        terminate_child(child);
+        return Err(ModelDownloadError::Failed(error));
+    }
     let cancelled_child = {
         let mut operation = stack.model_operation.lock().unwrap();
         operation.download = Some(child);
@@ -1702,9 +1737,9 @@ pub fn model_status(
             let size = if present {
                 fs::metadata(&path)
                     .map(|m| m.len())
-                    .unwrap_or_else(|_| est_size(&quant))
+                    .unwrap_or_else(|_| est_size_for_model(&lang, &quant))
             } else {
-                est_size(&quant)
+                est_size_for_model(&lang, &quant)
             };
             json!({ "present": present, "sizeBytes": size, "supported": true })
         }
@@ -2480,6 +2515,13 @@ mod tests {
         for quant in ["", "q8_0", "Q6_K", "../../outside", "Q8_0/../outside"] {
             assert!(validate_quant(quant).is_err(), "accepted {quant:?}");
         }
+    }
+
+    #[test]
+    fn english_q8_progress_uses_the_larger_published_size() {
+        assert_eq!(est_size_for_model("en", "Q8_0"), 4_028_683_104);
+        assert_eq!(est_size_for_model("de", "Q8_0"), 3_516_430_784);
+        assert!(est_size_for_model("en", "Q8_0") > est_size("Q8_0"));
     }
 
     #[test]

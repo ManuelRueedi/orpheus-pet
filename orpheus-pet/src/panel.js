@@ -1,8 +1,12 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { getVoices } from "./pet/orpheus.js";
 import { LINES, VOICE_LANG } from "./pet/samples.js";
+import { panelVisibility } from "./panel-layout.js";
+import { PANEL_SHADOW_PAD } from "./panel-placement.js";
+import { modelDownloadMessage, withElapsed } from "./progress-feedback.js";
 
 // This is the PANEL window: a thin control surface (voice/language pickers,
 // text box, hotkey recorder, download UI). It owns no audio — it forwards
@@ -70,23 +74,84 @@ let selectionRevision = 0;
 let langOptionsRevision = 0;
 let operationSequence = 0;
 let activeOperationId = null;
+let progressFeedback = null;
+let progressTicker = 0;
+let panelLayoutObserver = null;
+let panelLayoutQueued = false;
+let panelLayoutSync = Promise.resolve();
+let forcePanelLayoutReport = false;
+let lastPanelWindowSize = "";
+let lastReportedPanelSize = "";
+
+async function syncPanelLayout(force = false) {
+  const panel = el("panel");
+  if (!panel) return;
+  const rect = panel.getBoundingClientRect();
+  const width = Math.ceil(rect.width);
+  const height = Math.ceil(rect.height);
+  if (!width || !height) return;
+
+  const panelSize = `${width}x${height}`;
+  const windowWidth = width + (PANEL_SHADOW_PAD * 2);
+  const windowHeight = height + (PANEL_SHADOW_PAD * 2);
+  const windowSize = `${windowWidth}x${windowHeight}`;
+  if (windowSize !== lastPanelWindowSize) {
+    try {
+      await win.setSize(new LogicalSize(windowWidth, windowHeight));
+      lastPanelWindowSize = windowSize;
+    } catch (error) {
+      console.warn("could not resize the controls window:", error);
+    }
+  }
+  if (force || panelSize !== lastReportedPanelSize) {
+    await emitTo("main", "ui:panel-layout", { width, height }).catch(() => {});
+    lastReportedPanelSize = panelSize;
+  }
+}
+
+function schedulePanelLayoutSync(force = false) {
+  forcePanelLayoutReport ||= force;
+  if (panelLayoutQueued) return;
+  panelLayoutQueued = true;
+  queueMicrotask(() => {
+    panelLayoutQueued = false;
+    const forceNow = forcePanelLayoutReport;
+    forcePanelLayoutReport = false;
+    panelLayoutSync = panelLayoutSync
+      .then(() => syncPanelLayout(forceNow))
+      .catch((error) => console.warn("could not sync the controls layout:", error));
+  });
+}
+
+function watchPanelLayout() {
+  const panel = el("panel");
+  if (!panel) return;
+  if (typeof ResizeObserver === "function") {
+    panelLayoutObserver = new ResizeObserver(() => schedulePanelLayoutSync());
+    panelLayoutObserver.observe(panel);
+  }
+  schedulePanelLayoutSync(true);
+}
 
 // Voice-model size presets (the config's `quant`). Smaller = faster + less
 // VRAM/disk, at some quality cost. English publishes all three; other languages
 // fall back to Q8_0 in the backend when a smaller quant isn't available.
 // `vram` = rough VRAM (GB) to run the whole model on the GPU (optimal / -ngl 99).
 const QUANTS = [
-  { id: "Q8_0", label: "Best quality", vram: 6 },
-  { id: "Q4_K_M", label: "Balanced", vram: 3 },
-  { id: "Q2_K", label: "Low-spec", vram: 2 },
+  { id: "Q8_0", label: "High", detail: "Best quality", vram: 6 },
+  { id: "Q4_K_M", label: "Medium", detail: "Balanced", vram: 3 },
+  { id: "Q2_K", label: "Low", detail: "Low-spec", vram: 2 },
 ];
 const quantLabel = (id) => (QUANTS.find((q) => q.id === id) || {}).label || id;
-// Dropdown option text: quality label + the VRAM it wants for full-GPU performance.
-const quantOptionText = (q) => `${q.label} · ~${q.vram} GB VRAM`;
+// Keep the compact size names readable in the narrow popup. The select's title
+// carries the longer quality explanation.
+const quantOptionText = (q) => `${q.label} · ${q.vram} GB VRAM`;
 // Approx download size per quant (bytes), mirroring the backend's est_size so the
 // language dropdown's "⬇ X GB" tags match the confirm dialog. Unknown → Q8_0.
 const QUANT_BYTES = { Q8_0: 3_516_430_784, Q4_K_M: 2_360_000_000, Q2_K: 1_600_000_000 };
-const quantGb = (id) => ((QUANT_BYTES[id] || QUANT_BYTES.Q8_0) / 1e9).toFixed(1);
+const MODEL_BYTES = { en: { Q8_0: 4_028_683_104 } };
+const modelBytes = (lang, quant) => MODEL_BYTES[lang]?.[quant] || QUANT_BYTES[quant] || QUANT_BYTES.Q8_0;
+const quantGb = (id, lang = currentLang) => (modelBytes(lang, id) / 1e9).toFixed(1);
 const bytesGb = (bytes) => (Number(bytes || 0) / 1e9).toFixed(1);
 // Seed from the last local choice so size tags are right immediately; initQuantUi
 // refines it from the backend (authoritative) once the engine answers.
@@ -234,8 +299,8 @@ async function rebuildLangOptions({ quant = currentQuant } = {}) {
       ? " · active"
       : "";
     const downloadGb = l !== "en" && selectedQuant !== "Q8_0"
-      ? quantGb("Q8_0")
-      : quantGb(selectedQuant);
+      ? quantGb("Q8_0", l)
+      : quantGb(selectedQuant, l);
     // Availability always describes the selected size. An older loaded size can
     // keep speaking, but must not make a missing selected-size model look present.
     opt.textContent = !availabilityKnown
@@ -337,13 +402,13 @@ function setupCopy(stack) {
   const displayLang = operation?.targetLanguage || currentLang;
   const displayQuant = operation?.targetQuant || currentQuant;
   const langName = LANG_NAMES[displayLang] || displayLang || "voice";
-  const requestedModelBytes = stack.modelSizeBytes || QUANT_BYTES[displayQuant] || QUANT_BYTES.Q8_0;
+  const requestedModelBytes = stack.modelSizeBytes || modelBytes(displayLang, displayQuant);
   // English publishes all presets. Other languages may fall back to Q8 when a
   // smaller artifact is absent, so first-run consent shows the safe upper bound.
-  const modelBytes = displayLang !== "en" && displayQuant !== "Q8_0"
-    ? Math.max(requestedModelBytes, QUANT_BYTES.Q8_0)
+  const consentModelBytes = displayLang !== "en" && displayQuant !== "Q8_0"
+    ? Math.max(requestedModelBytes, modelBytes(displayLang, "Q8_0"))
     : requestedModelBytes;
-  const gb = (modelBytes / 1e9).toFixed(1);
+  const gb = (consentModelBytes / 1e9).toFixed(1);
   const stateAge = stack.state === currentStackState ? Date.now() - readinessStateSince : 0;
   const canRetryModel = stack.configReady && stack.runtimePresent && stack.backendPresent;
   const modelRecoveryState = ["model-missing", "loading-model", "error"].includes(stack.state);
@@ -407,18 +472,15 @@ function setupCopy(stack) {
         !/disabled in development/i.test(runtimeInstallPlan.error);
       const flavor = runtimeInstallPlan?.flavor === "cpu" ? "CPU" : "NVIDIA GPU";
       const runtimeBytes = Number(runtimeInstallPlan?.approximateBytes || 0);
-      const voiceBytes = stack.targetModelPresent ? 0 : modelBytes;
+      const voiceBytes = stack.targetModelPresent ? 0 : consentModelBytes;
       const totalBytes = runtimeBytes + voiceBytes;
-      const size = totalBytes ? ` About ${bytesGb(totalBytes)} GB to download.` : "";
-      const voiceStep = stack.targetModelPresent
-        ? `then loads the existing ${langName} · ${quantLabel(displayQuant)} voice.`
-        : `then downloads the ${langName} · ${quantLabel(displayQuant)} voice.`;
+      const size = totalBytes ? `~${bytesGb(totalBytes)} GB download` : "Download size unavailable";
       return {
-        title: "Set up local speech",
-        message: `Install the engine and ${langName} voice in one step.`,
-        hint: canInstall
-          ? `Uses the verified ${flavor} runtime, ${voiceStep}${size}`
-          : "From source, run the project setup script. Release builds can install the runtime here once its asset is published.",
+        title: "Set up speech",
+        message: canInstall
+          ? `${flavor} · ${size}`
+          : "Speech download unavailable",
+        hint: "",
         action: canInstall ? "initial-setup" : canRetryInstall ? "runtime-plan" : "retry",
         actionLabel: canInstall
           ? "Set up speech"
@@ -429,9 +491,9 @@ function setupCopy(stack) {
     }
     case "runtime-installing":
       return {
-        title: "Installing speech runtime",
-        message: "Downloading and verifying the local speech engine…",
-        hint: "The app verifies every file before activating it.",
+        title: "Setting up speech",
+        message: "Downloading and verifying…",
+        hint: "",
         action: null,
         actionLabel: "",
         autoOpen: true,
@@ -453,37 +515,41 @@ function setupCopy(stack) {
     }
     case "model-missing":
       return {
-        title: "One download to start",
-        message: `Download the ${langName} voice model (~${gb} GB).`,
-        hint: "You can choose a smaller model size above before downloading.",
+        title: "Download voice",
+        message: `${langName} · ${quantLabel(displayQuant)} · ~${gb} GB`,
+        hint: "",
         action: "model",
         actionLabel: `Download ${langName}`,
         autoOpen: true,
         kind: "warn",
       };
-    case "loading-model":
+    case "loading-model": {
+      // A correlated download/load operation reports its own live phase below.
+      // Do not treat total operation time as a stalled model startup.
+      const timedOut = !operation && stateAge > 150_000;
       return {
-        title: stateAge > 150_000 ? "Voice model needs attention" : "Loading voice model",
-        message: stateAge > 150_000
+        title: timedOut ? "Voice needs attention" : "Loading voice",
+        message: timedOut
           ? `${langName} is taking longer than expected to load.`
-          : `${langName} is being prepared for speech.`,
-        hint: stateAge > 150_000
+          : `${langName} · first launch may take a minute`,
+        hint: timedOut
           ? "Try again, then restart the app or check llama-server.log."
           : "This can take a minute on the first launch.",
-        action: stateAge > 150_000 ? "retry" : null,
+        action: timedOut ? "retry" : null,
         actionLabel: "Try again",
-        autoOpen: stateAge > 150_000,
-        kind: stateAge > 150_000 ? "error" : "busy",
+        autoOpen: timedOut,
+        kind: timedOut ? "error" : "busy",
       };
+    }
     case "starting-backend": {
       // The backend's first import may populate its local decoder cache, so give
       // it the same generous window as a model load before declaring recovery.
-      const timedOut = stateAge > 150_000;
+      const timedOut = !operation && stateAge > 150_000;
       return {
-        title: timedOut ? "Speech backend needs attention" : "Starting speech engine",
+        title: timedOut ? "Speech needs attention" : "Starting speech",
         message: timedOut
-          ? "The local speech backend is taking longer than expected."
-          : "The local speech services are starting…",
+          ? "Starting is taking longer than expected."
+          : "Usually a few seconds…",
         hint: timedOut ? "Restart the app; from source, rerun setup if this persists." : "This usually takes a few seconds.",
         action: timedOut ? "retry" : null,
         actionLabel: "Try again",
@@ -539,20 +605,18 @@ function setSpeechGate(ready, stack, copy = null) {
 
   if (engineReady) {
     if (!wasReady) setStatus("idle");
-    if (panelState === "setup") setPanelState("idle");
+    if (panelState === "setup" || (!wasReady && panelState === "idle")) setPanelState("idle");
     return readinessPublish;
   }
 
   const c = copy || setupCopy(stack || { state: currentStackState });
-  el("setupTitle").textContent = c.title;
   el("setupMsg").textContent = c.message;
-  el("setupHint").textContent = c.hint || "";
   setupActionKind = c.action;
   el("setupAction").textContent = c.actionLabel || "Check again";
   el("setupAction").style.display = c.action ? "block" : "none";
   el("setupAction").disabled = c.action === "initial-setup" && !initialSetupConsentIsCurrent();
   if (panelState !== "confirm" && panelState !== "downloading") setPanelState("setup");
-  setStatus(c.message, c.kind);
+  setStatus(c.title, c.kind);
   return readinessPublish;
 }
 
@@ -700,14 +764,48 @@ async function populateVoices() {
 // stay put above them.
 function setPanelState(state) {
   panelState = state;
-  const idle = state === "idle";
-  el("text").style.display = idle ? "block" : "none";
-  el("speakRow").style.display = idle ? "flex" : "none";
-  el("setupRow").style.display = state === "setup" ? "flex" : "none";
-  el("confirmRow").style.display = state === "confirm" ? "flex" : "none";
-  el("dlRow").style.display = state === "downloading" ? "flex" : "none";
+  if (state !== "downloading") clearProgressFeedback();
+  const visible = panelVisibility(state, engineReady);
+  el("panel").dataset.state = state;
+  el("pickerRows").style.display = visible.pickers ? "flex" : "none";
+  el("text").style.display = visible.text ? "block" : "none";
+  el("speakRow").style.display = visible.speak ? "flex" : "none";
+  el("setupRow").style.display = visible.setup ? "flex" : "none";
+  el("confirmRow").style.display = visible.confirm ? "flex" : "none";
+  el("dlRow").style.display = visible.download ? "flex" : "none";
+  el("utilityRow").style.display = visible.utilities ? "flex" : "none";
 }
-function setDownloadProgress(pct, label) {
+function clearProgressFeedback() {
+  if (progressTicker) window.clearInterval(progressTicker);
+  progressTicker = 0;
+  progressFeedback = null;
+}
+
+function renderProgressFeedback(now = Date.now()) {
+  const label = el("dlLabel");
+  if (!label || !progressFeedback) return;
+  const message = withElapsed(
+    progressFeedback.message,
+    now - progressFeedback.startedAt,
+  );
+  label.textContent = message;
+  el("dlBar")?.setAttribute("aria-valuetext", message);
+}
+
+function trackProgressFeedback(key, message) {
+  const now = Date.now();
+  if (!progressFeedback || progressFeedback.key !== key) {
+    progressFeedback = { key, message, startedAt: now };
+  } else {
+    progressFeedback.message = message;
+  }
+  renderProgressFeedback(now);
+  if (!progressTicker) {
+    progressTicker = window.setInterval(renderProgressFeedback, 1_000);
+  }
+}
+
+function setDownloadProgress(pct, label, feedbackKey = null) {
   const value = Math.max(0, Math.min(100, Number(pct) || 0));
   const f = el("dlFill");
   if (f) f.style.width = `${value}%`;
@@ -717,7 +815,13 @@ function setDownloadProgress(pct, label) {
     if (label) bar.setAttribute("aria-valuetext", label);
   }
   const l = el("dlLabel");
-  if (l && label) l.textContent = label;
+  if (l && label) {
+    if (feedbackKey) trackProgressFeedback(feedbackKey, label);
+    else {
+      clearProgressFeedback();
+      l.textContent = label;
+    }
+  }
 }
 
 // A confirmation owns a complete, versioned operation. Keeping the action and
@@ -729,6 +833,7 @@ function setPendingConfirmation(pending, message, buttonLabel = "Download") {
   pendingAction = pending;
   el("confirmDl").textContent = buttonLabel;
   el("confirmMsg").textContent = message;
+  el("confirmCancel").disabled = false;
   setPanelState("confirm");
   updatePickerGate();
 }
@@ -738,8 +843,26 @@ async function clearPendingConfirmation({ revert = false } = {}) {
   pendingAction = null;
   selectionRevision += 1;
   probingSelection = false;
-  if (revert && pending?.revert) await pending.revert();
+  el("confirmDl").disabled = false;
+  el("confirmCancel").disabled = false;
+  if (revert) await (pending?.revert || restoreLoadedSelection)();
   updatePickerGate();
+}
+
+// Leave confirmation immediately, even if its availability probe is still in
+// flight. Incrementing selectionRevision makes every late result harmless; the
+// loaded pair is restored in the background and can never trap the panel.
+async function cancelPendingConfirmation() {
+  if (panelState !== "confirm") return;
+  const cancellation = clearPendingConfirmation({ revert: true });
+  setPanelState(engineReady ? "idle" : "setup");
+  setStatus(engineReady ? "idle" : "Set up speech");
+  updatePickerGate();
+  try {
+    await cancellation;
+  } catch (error) {
+    console.warn("could not restore the loaded model selection:", error);
+  }
 }
 
 async function loadRuntimeInstallPlan({ refresh = false } = {}) {
@@ -800,16 +923,16 @@ async function doInitialSetup(targetLang, targetQuant, requestedVoice, runtimePl
   retryLanguage = null;
   retryQuant = null;
   const installingStack = { state: "runtime-installing" };
-  setSpeechGate(false, installingStack, setupCopy(installingStack));
-  publishSwitching(true, null);
-  el("stopDl").disabled = false;
-  setPanelState("downloading");
-  setDownloadProgress(0, "Preparing local speech setup…");
   let runtimeInstalled = false;
   let succeeded = false;
   let selectedVoice = "";
   let cancelledMessage = "";
   try {
+    setSpeechGate(false, installingStack, setupCopy(installingStack));
+    publishSwitching(true, null);
+    el("stopDl").disabled = false;
+    setPanelState("downloading");
+    setDownloadProgress(0, "Preparing local speech setup…", "setup-preparing");
     await invoke("install_runtime", { planId: runtimePlanId });
     runtimeInstalled = true;
     installingRuntime = false;
@@ -822,7 +945,7 @@ async function doInitialSetup(targetLang, targetQuant, requestedVoice, runtimePl
     // cancellable model operation. Enabling Stop before then would lose a fast
     // click in the handoff between the two setup phases.
     el("stopDl").disabled = true;
-    setDownloadProgress(50, `Runtime ready · preparing ${targetName} voice…`);
+    setDownloadProgress(50, `Runtime ready · preparing ${targetName} voice…`, "model-preparing");
 
     const result = await invoke("set_model_selection", {
       lang: targetLang,
@@ -932,7 +1055,7 @@ async function refreshInitialSetupSelection() {
     configReady: latestStackStatus?.configReady ?? true,
     runtimePresent: latestStackStatus?.runtimePresent ?? false,
     backendPresent: latestStackStatus?.backendPresent ?? false,
-    modelSizeBytes: Number(model?.sizeBytes || QUANT_BYTES[targetQuant]),
+    modelSizeBytes: Number(model?.sizeBytes || modelBytes(targetLang, targetQuant)),
     targetModelPresent: !!model?.present,
   };
   latestStackStatus = stack;
@@ -982,9 +1105,10 @@ async function stageModelSelection({ force = false } = {}) {
   };
   setPendingConfirmation(
     pending,
-    `Checking ${LANG_NAMES[targetLang] || targetLang} · ${quantLabel(targetQuant)}…`,
+    `Checking ${LANG_NAMES[targetLang] || targetLang}…`,
     "Checking…",
   );
+  setStatus("Checking model…", "busy");
   el("confirmDl").disabled = true;
 
   const rebuild = rebuildLangOptions({ quant: targetQuant });
@@ -993,7 +1117,7 @@ async function stageModelSelection({ force = false } = {}) {
     status = await invoke("model_status", { lang: targetLang, quant: targetQuant });
   } catch {
     // A failed availability probe must never bypass download consent.
-    status = { present: false, sizeBytes: QUANT_BYTES[targetQuant] };
+    status = { present: false, sizeBytes: modelBytes(targetLang, targetQuant) };
   }
   await rebuild;
   if (
@@ -1003,21 +1127,22 @@ async function stageModelSelection({ force = false } = {}) {
   ) return;
 
   probingSelection = false;
-  const requestedBytes = Number(status.sizeBytes || QUANT_BYTES[targetQuant]);
+  const requestedBytes = Number(status.sizeBytes || modelBytes(targetLang, targetQuant));
   const mayFallBackToQ8 = targetLang !== "en" && targetQuant !== "Q8_0";
   const consentBytes = mayFallBackToQ8
-    ? Math.max(requestedBytes, QUANT_BYTES.Q8_0)
+    ? Math.max(requestedBytes, modelBytes(targetLang, "Q8_0"))
     : requestedBytes;
   const gb = (consentBytes / 1e9).toFixed(1);
   const name = LANG_NAMES[targetLang] || targetLang;
   pendingAction = pending;
-  el("confirmDl").textContent = status.present ? "Switch" : "Download & switch";
+  el("confirmDl").textContent = status.present ? "Switch" : "Download";
   el("confirmDl").disabled = false;
   el("confirmMsg").textContent = status.present
-    ? `Switch to ${name} · ${quantLabel(targetQuant)}?`
+    ? `${name} · ${quantLabel(targetQuant)} · installed`
     : mayFallBackToQ8
-      ? `Download and switch to ${name} · ${quantLabel(targetQuant)} (up to ~${gb} GB if this language falls back to Best quality)?`
-      : `Download and switch to ${name} · ${quantLabel(targetQuant)} (~${gb} GB)?`;
+      ? `${name} · ${quantLabel(targetQuant)} · up to ~${gb} GB`
+      : `${name} · ${quantLabel(targetQuant)} · ~${gb} GB`;
+  setStatus(status.present ? "Ready to switch" : "Download needed", status.present ? "" : "warn");
   updatePickerGate();
 }
 
@@ -1061,18 +1186,18 @@ async function doModelSwitch(targetLang, targetQuant) {
     modelOperationActive: true,
     modelOperation: { active: true, targetLanguage: targetLang, targetQuant },
   };
-  setSpeechGate(false, loadingStack, setupCopy(loadingStack));
-  publishSwitching(true, operationId);
-  setPanelState("downloading");
-  // The correlated `preparing` event is the point at which Rust can reliably
-  // accept cancellation for this operation.
-  el("stopDl").disabled = true;
   const targetName = LANG_NAMES[targetLang] || targetLang;
-  setDownloadProgress(0, `Preparing ${targetName} · ${quantLabel(targetQuant)}…`);
-  setStatus(`preparing ${targetName}…`, "busy");
   let succeeded = false;
   let selectedVoice = "";
   try {
+    setSpeechGate(false, loadingStack, setupCopy(loadingStack));
+    publishSwitching(true, operationId);
+    setPanelState("downloading");
+    // The correlated `preparing` event is the point at which Rust can reliably
+    // accept cancellation for this operation.
+    el("stopDl").disabled = true;
+    setDownloadProgress(0, `Preparing ${targetName} · ${quantLabel(targetQuant)}…`, `model-${operationId}-preparing`);
+    setStatus(`preparing ${targetName}…`, "busy");
     const result = await invoke("set_model_selection", {
       lang: targetLang,
       quant: targetQuant,
@@ -1154,6 +1279,7 @@ function wireUi() {
   });
   el("lang").addEventListener("change", () => onLangChange(el("lang").value));
   el("quality").addEventListener("change", () => onQuantChange(el("quality").value));
+  el("confirmCancel").addEventListener("click", cancelPendingConfirmation);
   el("confirmDl").addEventListener("click", async () => {
     const btn = el("confirmDl");
     const pending = pendingAction;
@@ -1163,10 +1289,11 @@ function wireUi() {
       return;
     }
     btn.disabled = true;
+    el("confirmCancel").disabled = true;
     pendingAction = null;
     el("stopDl").disabled = false;
     setPanelState("downloading");
-    setDownloadProgress(0, "Preparing…");
+    setDownloadProgress(0, "Preparing…", "operation-preparing");
     updatePickerGate();
     try {
       const started = await pending.run();
@@ -1179,16 +1306,17 @@ function wireUi() {
       setPanelState(engineReady ? "idle" : "setup");
     } finally {
       btn.disabled = false;
+      el("confirmCancel").disabled = false;
       if (!switchingLang && !installingRuntime && panelState === "downloading") {
         setPanelState(engineReady ? "idle" : "setup");
       }
       updatePickerGate();
     }
   });
-  el("confirmCancel").addEventListener("click", async () => {
-    await clearPendingConfirmation({ revert: true });
-    setPanelState(engineReady ? "idle" : "setup");
-    updatePickerGate();
+  window.addEventListener("keydown", async (e) => {
+    if (e.key !== "Escape" || panelState !== "confirm") return;
+    e.preventDefault();
+    await cancelPendingConfirmation();
   });
   el("setupAction").addEventListener("click", async () => {
     const btn = el("setupAction");
@@ -1240,12 +1368,12 @@ function wireUi() {
   el("stopDl").addEventListener("click", async () => {
     el("stopDl").disabled = true;
     const pct = Number(el("dlBar")?.getAttribute("aria-valuenow") || 0);
-    setDownloadProgress(pct, "Stopping…");
+    setDownloadProgress(pct, "Stopping…", "operation-stopping");
     try {
       const stopped = installingRuntime
         ? await invoke("cancel_runtime_install")
         : await invoke("cancel_download");
-      if (!stopped) setDownloadProgress(pct, "Finishing the current load…");
+      if (!stopped) setDownloadProgress(pct, "Finishing the current load…", "operation-finishing");
     } catch { /* the operation's own result will surface the failure */ }
   });
 
@@ -1382,6 +1510,7 @@ async function initQuantUi() {
     const opt = document.createElement("option");
     opt.value = q.id;
     opt.textContent = quantOptionText(q);
+    opt.title = `${q.detail} · about ${q.vram} GB VRAM`;
     sel.appendChild(opt);
   }
   sel.value = currentQuant;
@@ -1407,6 +1536,8 @@ async function initQuantUi() {
 async function main() {
   wireUi();
   initHotkeyUi();
+  setPanelState("idle");
+  watchPanelLayout();
   // Fire-and-forget (don't block the panel on it): currentQuant is already seeded
   // from localStorage, and the engine boot that gates the language list is far
   // slower than this get_quant, so the size tags render correctly regardless.
@@ -1414,6 +1545,9 @@ async function main() {
 
   const focusPrimaryControl = () => {
     if (panelState === "setup" && setupActionKind) el("setupAction").focus();
+    else if (panelState === "confirm") {
+      (el("confirmDl").disabled ? el("confirmCancel") : el("confirmDl")).focus();
+    }
     else if (panelState === "idle") el("text").focus();
   };
 
@@ -1429,7 +1563,10 @@ async function main() {
     setStatus(p.text, p.kind);
   });
   // The pet just opened us → focus the primary control for this state.
-  await listen("pet:panel-open", focusPrimaryControl);
+  await listen("pet:panel-open", () => {
+    focusPrimaryControl();
+    schedulePanelLayoutSync(true);
+  });
   // The renderer (re)connected → resync and republish readiness. `pet:ready`
   // deliberately does not mean the speech engine itself is ready.
   await listen("pet:ready", () => {
@@ -1446,12 +1583,13 @@ async function main() {
     const p = e.payload || {};
     if (!activeOperationId || p.operationId !== activeOperationId) return;
     const name = LANG_NAMES[p.lang] || p.lang || "";
-    const gb = (n) => (Number(n || 0) / 1e9).toFixed(1);
+    const feedbackKey = `model-${p.operationId || "active"}-${p.phase || "working"}`;
     if (p.phase === "preparing") {
       setPanelState("downloading");
       setDownloadProgress(
         combinedSetupActive && combinedSetupPhase === "model" ? 50 : 0,
         `Preparing ${name} model…`,
+        feedbackKey,
       );
       el("stopDl").disabled = false;
     } else if (p.phase === "download") {
@@ -1466,8 +1604,11 @@ async function main() {
         : pct;
       setPanelState("downloading");
       el("stopDl").disabled = false;
-      const detail = p.total ? `${pct}% · ${gb(p.received)}/${gb(p.total)} GB` : `${gb(p.received)} GB`;
-      setDownloadProgress(displayedPct, `Downloading ${name} · ${detail}`);
+      setDownloadProgress(
+        displayedPct,
+        modelDownloadMessage({ name, pct, received: p.received, total: p.total }),
+        feedbackKey,
+      );
     } else if (p.phase === "loading") {
       const loadingStack = {
         state: "loading-model",
@@ -1475,20 +1616,20 @@ async function main() {
       };
       setSpeechGate(false, loadingStack, setupCopy(loadingStack));
       setPanelState("downloading");
-      setDownloadProgress(combinedSetupActive ? 98 : 100, `Loading ${name} model…`);
+      setDownloadProgress(combinedSetupActive ? 98 : 100, `Loading ${name} model…`, feedbackKey);
       // Rust can still cancel a slow load and restore the previous model until
       // it reaches the short commit boundary, so keep that escape hatch live.
       el("stopDl").disabled = false;
     } else if (p.phase === "ready") {
-      setDownloadProgress(100, `${name} ${p.quant || ""} ready`.replace(/\s+/g, " ").trim());
+      setDownloadProgress(100, `${name} ${p.quant || ""} ready`.replace(/\s+/g, " ").trim(), feedbackKey);
       el("stopDl").disabled = true;
     } else if (["failed", "error"].includes(p.phase)) {
       const pct = Number(p.pct || 0);
-      setDownloadProgress(combinedSetupActive ? 50 + (pct * 0.5) : pct, p.message || `Couldn't load ${name}`);
+      setDownloadProgress(combinedSetupActive ? 50 + (pct * 0.5) : pct, p.message || `Couldn't load ${name}`, feedbackKey);
       el("stopDl").disabled = true;
     } else if (p.phase === "cancelled") {
       const pct = Number(p.pct || 0);
-      setDownloadProgress(combinedSetupActive ? 50 + (pct * 0.5) : pct, `${name} download cancelled`);
+      setDownloadProgress(combinedSetupActive ? 50 + (pct * 0.5) : pct, `${name} download cancelled`, feedbackKey);
       el("stopDl").disabled = true;
     }
   });
@@ -1498,7 +1639,11 @@ async function main() {
     const p = e.payload || {};
     const pct = Number(p.pct ?? 0);
     setPanelState("downloading");
-    setDownloadProgress(combinedSetupActive ? pct * 0.5 : pct, p.message || "Installing speech runtime…");
+    setDownloadProgress(
+      combinedSetupActive ? pct * 0.5 : pct,
+      p.message || "Installing speech runtime…",
+      `runtime-${p.phase || "working"}`,
+    );
     if (["activating", "restarting", "ready"].includes(p.phase)) {
       el("stopDl").disabled = true;
     }

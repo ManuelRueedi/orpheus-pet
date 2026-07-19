@@ -424,6 +424,13 @@ jobs:
           npm install --global pnpm@10.12.4
           pnpm install --frozen-lockfile
 
+      - name: Test popup window orchestration
+        shell: pwsh
+        working-directory: orpheus-pet
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm test
+
       - name: Build only the NSIS bundle
         shell: pwsh
         working-directory: orpheus-pet

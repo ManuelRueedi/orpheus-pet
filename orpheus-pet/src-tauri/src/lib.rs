@@ -1,3 +1,4 @@
+mod process_control;
 mod runtime_installer;
 mod selection;
 mod stack;

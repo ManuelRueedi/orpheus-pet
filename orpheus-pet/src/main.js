@@ -10,6 +10,18 @@ import { createRenderer } from "./pet/renderer.js";
 import { LipSync } from "./pet/lipsync.js";
 import { synthesize, synthesizeStream } from "./pet/orpheus.js";
 import { LINES, VOICE_LANG } from "./pet/samples.js";
+import {
+  createPanelWindowController,
+  openPanelOnFirstLaunch,
+} from "./panel-window.js";
+import {
+  choosePanelSide,
+  DEFAULT_PANEL_SIZE,
+  normalizePanelSize,
+  PANEL_SHADOW_PAD,
+  panelContentRectFor,
+  PET_SIZE,
+} from "./panel-placement.js";
 
 // This is the PET window: a fixed-size, never-resized anchor. It renders the
 // witch, owns the audio + lip-sync, and drives a SEPARATE "panel" window that
@@ -233,15 +245,10 @@ async function togglePause() {
 // The pet window is the fixed anchor. The panel is its OWN window, positioned
 // in the free space beside the pet and clamped fully on-screen. Opening the
 // panel never touches the pet window, so the witch never moves.
-const PET_W = 148, PET_H = 280, PANEL_W = 320, PANEL_H = 260;
-const GAP = 8;   // space between the pet and the panel
-const PAD = 16;  // transparent margin inside the panel window for its shadow
 const TASKBAR = 48; // logical px reserved at the bottom of the work area
 
-let panelWin = null;   // the separate "panel" window handle
-let panelOpen = false;
-
-function clampNum(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+let panelController = null;
+let panelContentSize = { ...DEFAULT_PANEL_SIZE };
 
 async function monScale() {
   const m = (await currentMonitor()) || (await primaryMonitor());
@@ -251,7 +258,7 @@ async function monScale() {
 async function petScreenRect() {
   const s = await monScale();
   const p = await win.outerPosition();
-  return { x: p.x / s, y: p.y / s, w: PET_W, h: PET_H };
+  return { x: p.x / s, y: p.y / s, w: PET_SIZE.width, h: PET_SIZE.height };
 }
 // Work area in logical px (reserving the taskbar at the bottom).
 async function workArea() {
@@ -265,77 +272,42 @@ async function workArea() {
     bottom: (m.position.y + m.size.height) / s - TASKBAR,
   };
 }
-// Pick which side of the pet the popup sits on. Horizontal sides first, so
-// corners open to the side; otherwise open away from the nearest edge.
-function chooseSide(P, area) {
-  const above = P.y - area.top;
-  const below = area.bottom - (P.y + PET_H);
-  const left = P.x - area.left;
-  const right = area.right - (P.x + PET_W);
-  const cands = [
-    { side: "right", near: left, room: right, need: GAP + PANEL_W },
-    { side: "left", near: right, room: left, need: GAP + PANEL_W },
-    { side: "below", near: above, room: below, need: GAP + PANEL_H },
-    { side: "above", near: below, room: above, need: GAP + PANEL_H },
-  ];
-  cands.sort((a, b) => a.near - b.near);
-  for (const c of cands) if (c.room >= c.need) return c.side;
-  return cands.reduce((a, b) => (b.room - b.need > a.room - a.need ? b : a)).side;
-}
-// The popup's CONTENT rect adjacent to the pet on `side`, slid so the whole
-// window (content + PAD shadow room) stays on-screen.
-function panelContentRectFor(P, side, area) {
-  let x, y;
-  if (side === "right") { x = P.x + PET_W + GAP; y = P.y; }
-  else if (side === "left") { x = P.x - GAP - PANEL_W; y = P.y; }
-  else if (side === "below") { x = P.x; y = P.y + PET_H + GAP; }
-  else { x = P.x; y = P.y - GAP - PANEL_H; }
-  x = clampNum(x, area.left + PAD, area.right - PANEL_W - PAD);
-  y = clampNum(y, area.top + PAD, area.bottom - PANEL_H - PAD);
-  return { x, y };
-}
-
 // Move the panel window to the free side of the pet. The window's top-left is
-// the content rect minus the PAD shadow margin.
-async function placePanel() {
-  if (!panelWin) return;
+// the content rect minus its shadow margin. Its live painted dimensions arrive
+// from the panel webview whenever compact/full content changes.
+async function placePanel(panel) {
   const area = await workArea();
-  const P = await petScreenRect();
-  const c = area
-    ? panelContentRectFor(P, chooseSide(P, area), area)
-    : { x: P.x, y: P.y - GAP - PANEL_H };
-  await panelWin.setPosition(new LogicalPosition(Math.round(c.x - PAD), Math.round(c.y - PAD)));
+  const pet = await petScreenRect();
+  const side = area ? choosePanelSide(pet, area, panelContentSize) : "above";
+  const content = panelContentRectFor(pet, side, area, panelContentSize);
+  await panel.setPosition(new LogicalPosition(
+    Math.round(content.x - PANEL_SHADOW_PAD),
+    Math.round(content.y - PANEL_SHADOW_PAD),
+  ));
 }
 
-// Keep at most one placement in flight: each pet move that arrives while the
-// previous placement is still resolving is dropped, and the next move catches
-// up. This tracks the drag live without depending on requestAnimationFrame,
-// which Windows can starve during the OS move loop.
+// Keep at most one placement in flight and coalesce any update that arrives
+// during it. The trailing pass matters when the card resizes mid-drag: unlike a
+// move event, a layout change may not have another event to catch it up.
 let following = false;
+let followAgain = false;
 function scheduleFollow() {
-  if (!panelOpen || following) return;
+  if (!panelController?.isOpen()) return;
+  if (following) {
+    followAgain = true;
+    return;
+  }
   following = true;
-  placePanel().catch(() => {}).finally(() => { following = false; });
+  panelController.place().finally(() => {
+    following = false;
+    if (!followAgain) return;
+    followAgain = false;
+    scheduleFollow();
+  });
 }
 
-async function openPanel() {
-  if (!panelWin) return;
-  await placePanel();      // position BEFORE showing → appears in the right spot
-  await panelWin.show();
-  await panelWin.setFocus();
-  panelOpen = true;
-  emitTo("panel", "pet:panel-open", {}).catch(() => {});
-}
-async function closePanel() {
-  if (!panelWin || !panelOpen) return;
-  panelOpen = false;
-  await panelWin.hide();
-}
-async function togglePanel(force) {
-  const want = force ?? !panelOpen;
-  if (want) await openPanel();
-  else await closePanel();
-}
+const closePanel = () => panelController?.close() ?? Promise.resolve(false);
+const togglePanel = (force) => panelController?.toggle(force) ?? Promise.resolve(false);
 
 // ---- Drag + click ---------------------------------------------------------
 // Drag the pet window by dragging the witch; a click without movement talks or
@@ -404,7 +376,7 @@ async function animateBounce(fromX, fromY, toX, toY) {
       const x = Math.round(fromX + (toX - fromX) * e);
       const y = Math.round(fromY + (toY - fromY) * e);
       win.setPosition(new PhysicalPosition(x, y));
-      if (panelOpen) scheduleFollow(); // keep the popup glued through the bounce
+      if (panelController?.isOpen()) scheduleFollow(); // keep the popup glued through the bounce
       if (t < 1) requestAnimationFrame(step);
       else resolve();
     };
@@ -436,7 +408,7 @@ async function bounceIntoViewIfNeeded() {
 async function onDragSettled() {
   if (bouncing) return;
   await bounceIntoViewIfNeeded();
-  if (panelOpen) await placePanel();
+  if (panelController?.isOpen()) await panelController.place();
 }
 
 async function setupBounce() {
@@ -444,7 +416,7 @@ async function setupBounce() {
     // The popup follows live while the pet moves; when the pet stops (drag
     // released), re-place the popup and bounce back on-screen if needed.
     await win.onMoved(() => {
-      if (panelOpen) scheduleFollow();
+      if (panelController?.isOpen()) scheduleFollow();
       if (bouncing) return;
       clearTimeout(settleTimer);
       settleTimer = setTimeout(onDragSettled, 140);
@@ -455,20 +427,41 @@ async function setupBounce() {
 }
 
 async function main() {
+  panelController = createPanelWindowController({
+    lookup: async () => {
+      const wins = await getAllWindows();
+      return wins.find((candidate) => candidate.label === "panel") || null;
+    },
+    place: placePanel,
+    onOpened: () => emitTo("panel", "pet:panel-open", {}),
+  });
+
+  // The card itself changes height by state. Re-anchor after it has resized so
+  // compact setup/download views sit beside the witch rather than above her.
+  await listen("ui:panel-layout", (event) => {
+    const next = normalizePanelSize(event.payload, panelContentSize);
+    if (next.width === panelContentSize.width && next.height === panelContentSize.height) return;
+    panelContentSize = next;
+    scheduleFollow();
+  });
+
+  wireDragAndClick();
+  setupBounce();
+
+  // First launch is a product action, not a side effect of whichever readiness
+  // event happens to arrive after both webviews have installed their listeners.
+  // Record it only after the panel really opens so an early window race retries.
+  openPanelOnFirstLaunch({
+    storage: localStorage,
+    open: () => panelController.open(),
+  }).then((opened) => {
+    if (opened) setupPromptShown = true;
+  });
+
   const stage = el("petStage");
   const src = await resolvePetSrc();
   renderer = await createRenderer(stage, { src });
   lip = new LipSync({ onLevel: (v) => renderer.setMouthOpen(v) });
-
-  try {
-    const wins = await getAllWindows();
-    panelWin = wins.find((w) => w.label === "panel") || null;
-  } catch (e) {
-    console.warn("panel window unavailable:", e);
-  }
-
-  wireDragAndClick();
-  setupBounce();
 
   // ---- Commands from the panel window ----
   await listen("ui:speak", (e) => {
@@ -496,7 +489,12 @@ async function main() {
     // backend/model startup stays quiet unless it exceeds the panel's grace time.
     if (p.setupRequired && !setupPromptShown) {
       setupPromptShown = true;
-      togglePanel(true);
+      togglePanel(true).then((opened) => {
+        // A window created just after the bounded lookup can still miss this
+        // attempt. Let the next readiness update try again instead of latching
+        // the automatic setup prompt off forever.
+        if (!opened && !engineReady) setupPromptShown = false;
+      });
     }
   });
   await listen("ui:switching", (e) => {
