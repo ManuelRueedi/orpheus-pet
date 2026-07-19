@@ -16,6 +16,14 @@ import sys
 SNAC_REVISION = "d73ad176a12188fcf4f360ba3bf2c2fbbe8f58ec"
 
 
+def _configure_utf8_console() -> None:
+    """Keep frozen startup logs safe on Windows' legacy console encodings."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def _backend_directory() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -75,6 +83,11 @@ def _configure_packaged_snac(backend_directory: Path) -> None:
 
 
 def main() -> None:
+    # PyInstaller initializes its embedded interpreter before PYTHONUTF8 can
+    # affect stdio. app.py and the vendored engine log Unicode status symbols,
+    # so configure both streams before importing either module.
+    _configure_utf8_console()
+
     parser = argparse.ArgumentParser(description="Run the packaged Orpheus TTS backend")
     parser.add_argument("--host", default=os.environ.get("ORPHEUS_HOST", "127.0.0.1"))
     parser.add_argument(
