@@ -2300,6 +2300,18 @@ mod tests {
     }
 
     #[test]
+    fn rejects_machine_state_but_allows_runtime_templates_and_decoder_weight() {
+        assert!(forbidden_payload_path("backend/.env"));
+        assert!(forbidden_payload_path("backend/.ENV"));
+        assert!(forbidden_payload_path("backend/stack.config.json"));
+        assert!(forbidden_payload_path("backend/pyvenv.cfg"));
+        assert!(!forbidden_payload_path("backend/.env.example"));
+        assert!(!forbidden_payload_path(
+            "backend/snac-model/pytorch_model.bin"
+        ));
+    }
+
+    #[test]
     fn rejects_tampered_payload_file_hash() {
         let directory = TestDirectory::new();
         let file = directory.0.join("payload.dll");

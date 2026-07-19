@@ -719,23 +719,39 @@ print(json.dumps({
         }
     }
 
+    # The backend bootstraps .env from .env.example on first launch. That copy
+    # belongs to an installed machine, and the app verifier deliberately rejects
+    # it, so do not let the packaging smoke test turn it into release payload.
+    $smokeEnvironment = Join-Path $packBackend '.env'
+    if (Test-Path -LiteralPath $smokeEnvironment) {
+        $smokeEnvironmentItem = Get-Item -LiteralPath $smokeEnvironment -Force
+        if ($smokeEnvironmentItem.PSIsContainer -or
+                ($smokeEnvironmentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Smoke-created backend .env is not a normal file: $smokeEnvironment"
+        }
+        Remove-Item -LiteralPath $smokeEnvironment -Force
+    }
+
     Write-Step 'Creating payload manifest'
     $allowedSnacWeight = 'backend/snac-model/pytorch_model.bin'
-    $forbiddenVoiceModels = @(Get-ChildItem -LiteralPath $packRoot -Recurse -Force -File |
+    $forbiddenPayloadState = @(Get-ChildItem -LiteralPath $packRoot -Recurse -Force -File |
         Where-Object {
             $relative = Get-PortableRelativePath -BasePath $packRoot -FilePath $_.FullName
-            $_.Extension.ToLowerInvariant() -in @(
-                '.gguf', '.safetensors', '.pt', '.pth', '.ckpt', '.bin'
-            ) -and -not $relative.Equals(
+            $name = $_.Name.ToLowerInvariant()
+            $extension = $_.Extension.ToLowerInvariant()
+            $allowedDecoderWeight = $relative.Equals(
                 $allowedSnacWeight,
                 [System.StringComparison]::Ordinal
             )
+            $name -in @('.env', 'stack.config.json', 'pyvenv.cfg', 'restart.flag') -or
+                $relative -match '(^|/)outputs/' -or
+                $extension -in @('.log', '.wav', '.mp3', '.flac', '.ogg') -or
+                ($extension -in @(
+                    '.gguf', '.safetensors', '.pt', '.pth', '.ckpt', '.bin'
+                ) -and -not $allowedDecoderWeight)
         })
-    if ($forbiddenVoiceModels.Count -gt 0) {
-        throw "Voice or unapproved model file reached runtime staging: $($forbiddenVoiceModels.FullName -join ', ')"
-    }
-    if (Test-Path -LiteralPath (Join-Path $packBackend 'pyvenv.cfg')) {
-        throw "A Python venv was copied into the runtime pack; package the PyInstaller onedir instead"
+    if ($forbiddenPayloadState.Count -gt 0) {
+        throw "Machine state or unapproved model data reached runtime staging: $($forbiddenPayloadState.FullName -join ', ')"
     }
     Assert-NoReparsePoints -Path $packRoot -Description 'runtime staging tree'
 
