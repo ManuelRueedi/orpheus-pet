@@ -742,6 +742,7 @@ jobs:
           print(f"Release order verified: {latest_tag} -> {tag}")
 
       - name: Create or reset an unpublished draft
+        id: draft_release
         if: steps.release_order.outputs.already_published != 'true'
         shell: bash
         env:
@@ -750,18 +751,9 @@ jobs:
           RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
-          if release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,tagName 2>/dev/null)"; then
-            jq -e --arg tag "$RELEASE_TAG" \
-              '.isDraft == true and .isPrerelease == false and .tagName == $tag' \
-              <<<"$release_json" >/dev/null || {
-                echo "Refusing to replace an existing published or prerelease release: $RELEASE_TAG" >&2
-                exit 1
-              }
-            release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq .id)"
-            while IFS= read -r asset_id; do
-              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
-            done < <(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" --jq '.[].id')
-          else
+          if ! release_json="$(gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json apiUrl,isDraft,isPrerelease,tagName 2>/dev/null)"; then
             gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
@@ -769,7 +761,34 @@ jobs:
               --title "Orpheus Pet $RELEASE_VERSION" \
               --notes "Windows caveat: this installer is currently unsigned, so SmartScreen may show an Unknown publisher warning." \
               --generate-notes
+            release_json=""
+            for attempt in 1 2 3 4 5 6; do
+              if release_json="$(gh release view "$RELEASE_TAG" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --json apiUrl,isDraft,isPrerelease,tagName 2>/dev/null)"; then
+                break
+              fi
+              sleep "$((attempt * 2))"
+            done
           fi
+          jq -e --arg tag "$RELEASE_TAG" \
+            '.isDraft == true and .isPrerelease == false and .tagName == $tag and
+             (.apiUrl | type == "string")' \
+            <<<"$release_json" >/dev/null || {
+              echo "Refusing to replace an existing published or prerelease release: $RELEASE_TAG" >&2
+              exit 1
+            }
+          release_api="$(jq -r '.apiUrl' <<<"$release_json")"
+          release_id="${release_api##*/}"
+          expected_api="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id"
+          if [[ ! "$release_id" =~ ^[1-9][0-9]*$ || "$release_api" != "$expected_api" ]]; then
+            echo "Draft API URL is not scoped to this repository: $release_api" >&2
+            exit 1
+          fi
+          while IFS= read -r asset_id; do
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+          done < <(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" --jq '.[].id')
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
 
       - name: Upload every asset while the release is still draft
         if: steps.release_order.outputs.already_published != 'true'
@@ -789,6 +808,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+          RELEASE_ID: ${{ steps.draft_release.outputs.release_id }}
         run: |
           import hashlib
           import json
@@ -798,10 +818,12 @@ jobs:
 
           raw = subprocess.check_output([
               "gh", "api",
-              f"repos/{os.environ['GITHUB_REPOSITORY']}/releases/tags/{os.environ['RELEASE_TAG']}"
+              f"repos/{os.environ['GITHUB_REPOSITORY']}/releases/{os.environ['RELEASE_ID']}"
           ])
           release = json.loads(raw)
           assert release["draft"] is True and release["prerelease"] is False
+          assert release["tag_name"] == os.environ["RELEASE_TAG"]
+          assert release["id"] == int(os.environ["RELEASE_ID"])
           remote = {asset["name"]: asset for asset in release["assets"]}
           local = {path.name: path for path in Path("release-assets").iterdir() if path.is_file()}
           assert set(remote) == set(local), "remote release asset set differs from validated local set"
