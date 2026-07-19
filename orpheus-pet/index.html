@@ -15,31 +15,178 @@
         <!-- Brewing cauldron shown while a language model downloads/loads.
              The potion level = download %. -->
         <div id="cauldron" class="cauldron">
-          <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+          <svg viewBox="26 0 148 280" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A bubbling cauldron showing download progress">
             <defs>
               <clipPath id="potCavity">
-                <path d="M46 92 L154 92 Q154 154 100 166 Q46 154 46 92 Z"/>
+                <path d="M47 128 C47 158 52 189 67 210 C79 225 121 225 133 209 C148 187 153 157 153 128 Q127 140 100 140 Q73 140 47 128 Z"/>
               </clipPath>
+              <!-- This mask follows the liquid transform so the refracted
+                   spoon copy exists only below the live waterline. -->
+              <clipPath id="waterDepthClip" clipPathUnits="userSpaceOnUse">
+                <rect id="waterDepthMask" x="44" y="134" width="112" height="100" transform="translate(0 84)"/>
+              </clipPath>
+              <linearGradient id="potGradient" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#46505a"/>
+                <stop offset="0.42" stop-color="#293139"/>
+                <stop offset="1" stop-color="#151b21"/>
+              </linearGradient>
+              <linearGradient id="rimGradient" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stop-color="#654329"/>
+                <stop offset="0.5" stop-color="#c28a4b"/>
+                <stop offset="1" stop-color="#69462a"/>
+              </linearGradient>
+              <linearGradient id="potionGradient" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="#9cd8ca"/>
+                <stop offset="0.45" stop-color="#5fb5a7"/>
+                <stop offset="1" stop-color="#2f756f"/>
+              </linearGradient>
+              <linearGradient id="surfaceGradient" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stop-color="#4b9f96"/>
+                <stop offset="0.45" stop-color="#c3e7d8"/>
+                <stop offset="1" stop-color="#63b8aa"/>
+              </linearGradient>
+              <linearGradient id="woodGradient" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stop-color="#613922"/>
+                <stop offset="0.48" stop-color="#b67545"/>
+                <stop offset="1" stop-color="#704028"/>
+              </linearGradient>
+              <linearGradient id="fireGradient" x1="0" y1="1" x2="0" y2="0">
+                <stop offset="0" stop-color="#fb6f2d"/>
+                <stop offset="0.55" stop-color="#ffb13b"/>
+                <stop offset="1" stop-color="#fff0a2"/>
+              </linearGradient>
+              <linearGradient id="steamGradient" x1="0" y1="1" x2="0" y2="0">
+                <stop offset="0" stop-color="#71b7aa" stop-opacity="0.1"/>
+                <stop offset="0.55" stop-color="#d8eee5" stop-opacity="0.62"/>
+                <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+              </linearGradient>
+              <radialGradient id="ambientGlow">
+                <stop offset="0" stop-color="#66b6aa" stop-opacity="0.3"/>
+                <stop offset="0.6" stop-color="#d39a4f" stop-opacity="0.08"/>
+                <stop offset="1" stop-color="#d39a4f" stop-opacity="0"/>
+              </radialGradient>
+              <filter id="potionGlow" x="-35%" y="-25%" width="170%" height="160%">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur"/>
+                <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
+              <filter id="moteGlow" x="-250%" y="-250%" width="600%" height="600%">
+                <feGaussianBlur stdDeviation="2" result="blur"/>
+                <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
+              <filter id="runeGlow" x="-80%" y="-80%" width="260%" height="260%">
+                <feGaussianBlur stdDeviation="1.2" result="blur"/>
+                <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
             </defs>
-            <ellipse class="fire" cx="100" cy="184" rx="42" ry="9"/>
-            <path class="pot-body" d="M40 92 Q34 152 64 176 Q100 192 136 176 Q166 152 160 92 Z"/>
-            <g clip-path="url(#potCavity)">
-              <g id="liquid" transform="translate(0 76)">
-                <rect class="potion" x="44" y="90" width="112" height="92"/>
-                <ellipse class="surface" cx="100" cy="92" rx="52" ry="6"/>
-                <circle class="bubble b1" cx="80" cy="146" r="5"/>
-                <circle class="bubble b2" cx="110" cy="152" r="7"/>
-                <circle class="bubble b3" cx="124" cy="146" r="4"/>
-                <circle class="bubble b4" cx="92" cy="156" r="6"/>
+
+            <ellipse class="cauldron-ambient" cx="100" cy="165" rx="69" ry="105"/>
+            <g id="steamCloud">
+              <path class="steam s1" d="M72 108 C59 94 78 82 70 67 C63 54 75 46 79 34"/>
+              <path class="steam s2" d="M101 103 C90 88 108 76 101 60 C95 47 108 39 106 25"/>
+              <path class="steam s3" d="M128 108 C141 94 124 83 133 69 C141 56 131 48 133 38"/>
+            </g>
+            <g id="magicMotes">
+              <path class="magic-mote m1" d="M55 88 l1.6 4 4 1.6-4 1.6-1.6 4-1.6-4-4-1.6 4-1.6z"/>
+              <circle class="magic-mote m2" cx="147" cy="95" r="2.3"/>
+              <path class="magic-mote m3" d="M149 61 l1.2 3 3 1.2-3 1.2-1.2 3-1.2-3-3-1.2 3-1.2z"/>
+            </g>
+
+            <g id="cauldronRig">
+              <ellipse class="cauldron-ground" cx="100" cy="261" rx="58" ry="8"/>
+
+              <!-- A dark forged bail sits behind the bowl instead of reading as
+                   decorative gold trim. -->
+              <path class="handle-back" d="M49 146 C38 80 162 80 151 146"/>
+              <path class="handle-highlight" d="M52 141 C46 91 154 91 148 141"/>
+
+              <g id="firePit">
+                <path class="log log-left" d="M66 249 Q83 239 110 245 L128 253 Q118 260 96 255 L72 257 Z"/>
+                <path class="log log-right" d="M73 253 Q91 242 116 240 L132 248 Q119 258 96 258 Z"/>
+                <path class="log-ring" d="M69 249 q7 2 4 8 M125 247 q-7 3-5 9"/>
+                <path class="flame flame-outer f1" d="M78 252 C71 241 80 234 85 225 C85 237 94 241 89 253 Z"/>
+                <path class="flame flame-outer f2" d="M90 254 C83 238 98 229 100 214 C105 232 115 239 108 254 Z"/>
+                <path class="flame flame-outer f3" d="M109 253 C104 241 116 234 119 225 C123 238 130 244 124 253 Z"/>
+                <path class="flame flame-inner" d="M94 254 C91 246 99 240 101 231 C105 242 111 247 106 254 Z"/>
+                <circle class="ember e1" cx="81" cy="235" r="2"/>
+                <circle class="ember e2" cx="121" cy="238" r="1.6"/>
               </g>
+
+              <path class="pot-foot left-foot" d="M58 218 Q67 216 75 222 L73 241 Q62 247 52 240 L54 229 Z"/>
+              <path class="pot-foot right-foot" d="M125 222 Q133 216 142 220 L147 239 Q138 247 126 242 Z"/>
+              <path class="foot-edge" d="M53 239 Q63 244 73 239 M127 240 Q137 245 146 238"/>
+
+              <path class="pot-body" d="M42 123 C41 153 47 190 63 213 C75 231 124 232 138 212 C153 189 159 153 158 123 Q132 135 100 135 Q68 135 42 123 Z"/>
+              <path class="pot-shade" d="M129 132 C145 154 143 190 124 216 Q136 213 143 199 C153 178 157 147 154 127 Z"/>
+              <path class="pot-highlight" d="M55 142 C52 170 59 199 75 216"/>
+
+              <!-- Back rim and dark cavity sit behind the utensil; the front
+                   rim is drawn later so the shaft visibly passes inside. -->
+              <ellipse class="rim-back" cx="100" cy="122" rx="59" ry="15"/>
+              <ellipse class="rim-inner" cx="100" cy="122" rx="51" ry="9.5"/>
+
+              <!-- The spoon is painted before the liquid, so everything below
+                   the moving waterline is naturally tinted and softened. -->
+              <g id="spoon">
+                <path class="spoon-handle" d="M122 48 Q110 117 96 205"/>
+                <path class="spoon-grain" d="M119 58 Q109 118 99 188 M123 70 Q114 130 104 174"/>
+                <ellipse class="spoon-bowl" cx="95" cy="212" rx="13" ry="7.5" transform="rotate(-8 95 212)"/>
+                <path class="spoon-highlight" d="M87 211 Q95 207 103 211"/>
+              </g>
+
+              <g clip-path="url(#potCavity)">
+                <g id="liquid" transform="translate(0 84)">
+                  <rect class="potion" x="44" y="134" width="112" height="100"/>
+                  <ellipse class="surface" cx="100" cy="134" rx="51" ry="7.5"/>
+                  <path class="surface-glint" d="M62 133 Q75 128 88 132 M111 136 Q125 139 139 133"/>
+                  <path class="potion-ripple" d="M81 136 q10-5 21 0 M112 132 q7-3 14 0"/>
+                  <circle class="bubble b1" cx="74" cy="174" r="4.2"/>
+                  <circle class="bubble b2" cx="103" cy="186" r="5.8"/>
+                  <circle class="bubble b3" cx="129" cy="165" r="3.5"/>
+                  <circle class="bubble b4" cx="88" cy="207" r="4.8"/>
+                  <circle class="bubble b5" cx="119" cy="216" r="4.2"/>
+                  <circle class="top-bubble t1" cx="76" cy="125" r="3.8"/>
+                  <circle class="top-bubble t2" cx="128" cy="128" r="4.8"/>
+                </g>
+              </g>
+
+              <!-- A water-tinted duplicate restores the refracted silhouette
+                   after the potion layer. Fixed clips keep it inside both the
+                   cauldron and the moving water column. -->
+              <g clip-path="url(#potCavity)">
+                <g clip-path="url(#waterDepthClip)">
+                  <g id="spoonUnderwater">
+                    <path class="spoon-underwater-handle" d="M122 48 Q110 117 96 205"/>
+                    <ellipse class="spoon-underwater-bowl" cx="95" cy="212" rx="13" ry="7.5" transform="rotate(-8 95 212)"/>
+                    <path class="spoon-underwater-highlight" d="M87 211 Q95 207 103 211"/>
+                  </g>
+                </g>
+              </g>
+
+              <path class="pot-shell-front" d="M44 132 C44 159 50 190 65 211 C78 228 122 229 136 210 C149 188 155 157 156 131 Q132 141 100 141 Q68 141 44 132 Z"/>
+              <path class="pot-seam" d="M51 153 Q100 166 149 153 M58 207 Q100 219 141 205"/>
+              <g class="hammer-marks">
+                <path d="M57 167 q5-4 10 0 M78 177 q5 3 10-1 M116 164 q6-4 11 0 M134 179 q-5 4-10 0"/>
+                <path d="M60 201 q6-3 11 1 M79 217 q5-3 10 0 M115 215 q5-3 10 0 M137 201 q-5 3-10-1"/>
+                <circle cx="69" cy="188" r="2.4"/><circle cx="132" cy="191" r="2.1"/>
+              </g>
+              <path class="level-ticks" d="M56 151 h5 M54 166 h5 M56 181 h5 M59 196 h5 M139 151 h5 M141 166 h5 M139 181 h5 M136 196 h5"/>
+
+              <path class="rim-front" d="M44 122 C58 140 82 140 100 133 C120 140 144 139 156 122"/>
+              <path class="rim-glint" d="M50 116 Q75 105 99 112 Q126 105 150 117"/>
+              <g class="rim-rivets">
+                <circle cx="57" cy="130" r="1.7"/><circle cx="75" cy="135" r="1.5"/>
+                <circle cx="125" cy="135" r="1.5"/><circle cx="143" cy="130" r="1.7"/>
+              </g>
+
+              <g id="sideHandles">
+                <path class="handle-lug" d="M42 137 Q31 139 31 150 Q36 158 46 154 L49 145 Z"/>
+                <path class="handle-lug" d="M158 137 Q169 139 169 150 Q164 158 154 154 L151 145 Z"/>
+                <circle class="side-ring" cx="38" cy="147" r="9"/><circle class="side-ring-hole" cx="38" cy="147" r="4.2"/>
+                <circle class="side-ring" cx="162" cy="147" r="9"/><circle class="side-ring-hole" cx="162" cy="147" r="4.2"/>
+              </g>
+
+              <path class="pot-rune" d="M62 181 l5-8 5 8 M128 181 l5-8 5 8 M61 199 q6-8 12 0 M127 199 q6-8 12 0"/>
             </g>
-            <ellipse class="rim" cx="100" cy="93" rx="57" ry="12"/>
-            <path class="handle" d="M50 90 Q100 62 150 90"/>
-            <g id="spoon">
-              <rect x="97" y="42" width="6" height="72" rx="3"/>
-              <ellipse cx="100" cy="116" rx="11" ry="6"/>
-            </g>
-            <text id="cauldronPct" x="100" y="138">0%</text>
           </svg>
         </div>
       </div>

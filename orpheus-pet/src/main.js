@@ -38,22 +38,20 @@ function setStatus(text, kind = "") {
 
 // Brewing cauldron shown while a language model downloads/loads; the potion
 // level rises with the download %. (The cauldron lives on the pet.)
-const CAULDRON_TRAVEL = 76; // SVG user units the liquid moves between empty/full
+const CAULDRON_TRAVEL = 84; // SVG user units from the belly floor to the inner rim
 function showCauldron() {
   el("pet").classList.add("loading");
 }
 function hideCauldron() {
   el("pet").classList.remove("loading");
 }
-function setCauldronPct(pct, label) {
+function setCauldronPct(pct) {
   const p = Math.max(0, Math.min(100, Number(pct) || 0));
-  const liquid = el("liquid");
-  if (liquid) {
-    const dy = ((100 - p) / 100) * CAULDRON_TRAVEL;
-    liquid.setAttribute("transform", `translate(0 ${dy.toFixed(1)})`);
+  const dy = ((100 - p) / 100) * CAULDRON_TRAVEL;
+  const transform = `translate(0 ${dy.toFixed(1)})`;
+  for (const id of ["liquid", "waterDepthMask"]) {
+    el(id)?.setAttribute("transform", transform);
   }
-  const t = el("cauldronPct");
-  if (t) t.textContent = label || `${Math.round(p)}%`;
 }
 
 // A .riv dropped at public/pets/witch.riv is served at /pets/witch.riv.
@@ -571,13 +569,13 @@ async function main() {
     if (operationId && !terminal) activeModelOperationId = operationId;
     if (p.phase === "preparing") {
       showCauldron();
-      setCauldronPct(0, "preparing");
+      setCauldronPct(0);
     } else if (p.phase === "download") {
       showCauldron();
       setCauldronPct(p.pct ?? 0);
     } else if (p.phase === "loading") {
       showCauldron();
-      setCauldronPct(100, "brewing");
+      setCauldronPct(100);
     } else if (terminal) {
       activeModelOperationId = null;
       switchingLang = false;
@@ -591,14 +589,7 @@ async function main() {
     if (!switchingLang) return;
     const p = e.payload || {};
     showCauldron();
-    const label = p.phase?.startsWith("verifying")
-      ? "checking"
-      : p.phase === "extracting" || p.phase === "installing"
-        ? "unpacking"
-        : p.phase === "activating" || p.phase === "restarting"
-          ? "starting"
-          : undefined;
-    setCauldronPct(p.pct ?? 0, label);
+    setCauldronPct(p.pct ?? 0);
   });
 
   // Tell the panel we're ready so it can (re)sync the current voice to us.

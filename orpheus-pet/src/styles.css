@@ -53,98 +53,520 @@ html, body {
   position: absolute;
   inset: 0;
   display: none;
-  filter: drop-shadow(0 8px 12px rgba(0, 0, 0, 0.35));
+  filter: drop-shadow(0 9px 13px rgba(9, 15, 18, 0.46));
 }
 .cauldron svg { width: 100%; height: 100%; display: block; }
 .pet.loading #petStage { display: none; }
-.pet.loading .cauldron { display: block; }
-
-.pot-body { fill: #1b1330; }
-.rim { fill: none; stroke: #2f2350; stroke-width: 6; }
-.handle { fill: none; stroke: #2f2350; stroke-width: 5; stroke-linecap: round; }
-.potion { fill: #3fbf6f; }
-.surface { fill: rgba(190, 255, 214, 0.55); transform-box: fill-box; transform-origin: center; }
-#liquid { filter: drop-shadow(0 0 6px rgba(80, 240, 150, 0.55)); }
-.bubble { fill: rgba(255, 255, 255, 0.55); transform-box: fill-box; transform-origin: center; }
-#spoon rect { fill: #8a5a2b; }
-#spoon ellipse { fill: #a06a34; }
-#spoon { transform-box: view-box; transform-origin: 100px 94px; }
-.fire { fill: rgba(255, 150, 45, 0.55); transform-box: fill-box; transform-origin: center; }
-#cauldronPct {
-  text-anchor: middle;
-  dominant-baseline: middle;
-  font: 800 30px "Segoe UI", system-ui, sans-serif;
-  fill: #fff;
-  stroke: #0f2a1c;
-  stroke-width: 3;
-  paint-order: stroke;
+.pet.loading .cauldron {
+  display: block;
+  animation: cauldron-arrive 0.48s cubic-bezier(0.18, 1.35, 0.35, 1) both;
 }
 
-/* Animations only run while brewing (the .loading class). */
-.pet.loading .bubble { animation: bubble 2.4s ease-in infinite; }
-.pet.loading .bubble.b2 { animation-delay: 0.5s; }
-.pet.loading .bubble.b3 { animation-delay: 1s; }
-.pet.loading .bubble.b4 { animation-delay: 1.5s; }
-@keyframes bubble {
-  0% { transform: translateY(6px) scale(0.5); opacity: 0; }
-  20% { opacity: 0.85; }
-  80% { opacity: 0.5; }
-  100% { transform: translateY(-42px) scale(1); opacity: 0; }
+#cauldronRig { transform-box: view-box; transform-origin: 100px 242px; }
+.cauldron-ambient { fill: url(#ambientGlow); opacity: 0.48; }
+.cauldron-ground {
+  fill: rgba(12, 18, 20, 0.46);
+  transform-box: fill-box;
+  transform-origin: center;
 }
-.pet.loading .surface { animation: shimmer 2s ease-in-out infinite; }
-@keyframes shimmer {
-  0%, 100% { transform: scaleX(1); opacity: 0.5; }
-  50% { transform: scaleX(1.08); opacity: 0.78; }
+.handle-back,
+.handle-highlight {
+  fill: none;
+  stroke-linecap: round;
 }
-.pet.loading #spoon { animation: stir 2.2s ease-in-out infinite; }
-@keyframes stir {
-  0%, 100% { transform: rotate(-24deg); }
-  50% { transform: rotate(24deg); }
+.handle-back { stroke: #141b20; stroke-width: 6; }
+.handle-highlight { stroke: #637078; stroke-width: 1.5; opacity: 0.5; }
+.pot-body {
+  fill: url(#potGradient);
+  stroke: #0d1216;
+  stroke-width: 2.6;
 }
-.pet.loading .fire { animation: flicker 0.5s ease-in-out infinite alternate; }
-@keyframes flicker {
-  from { opacity: 0.4; transform: scaleX(1); }
-  to { opacity: 0.85; transform: scaleX(1.18); }
+.pot-shade { fill: rgba(5, 9, 12, 0.4); }
+.pot-highlight {
+  fill: none;
+  stroke: rgba(165, 182, 181, 0.38);
+  stroke-width: 2.4;
+  stroke-linecap: round;
 }
-
-/* Idle float; a gentle wiggle is layered on while talking. */
-#witchBody {
+.pot-seam {
+  fill: none;
+  stroke: rgba(9, 14, 18, 0.5);
+  stroke-width: 1.3;
+  stroke-dasharray: 2 4.5;
+}
+.pot-dents {
+  fill: none;
+  stroke: rgba(14, 20, 24, 0.68);
+  stroke-width: 1.5;
+}
+.pot-shell-front {
+  fill: rgba(25, 32, 37, 0.48);
+  stroke: rgba(8, 12, 15, 0.64);
+  stroke-width: 1.35;
+}
+.hammer-marks { fill: none; stroke: rgba(135, 148, 146, 0.25); stroke-width: 1.25; }
+.hammer-marks circle { fill: rgba(8, 13, 16, 0.4); stroke: rgba(137, 150, 147, 0.22); }
+.level-ticks { fill: none; stroke: rgba(195, 143, 77, 0.62); stroke-width: 1.2; }
+.rim-back {
+  fill: #171e23;
+  stroke: #765034;
+  stroke-width: 2.6;
+}
+.rim-inner { fill: #080d10; stroke: #3d2a1d; stroke-width: 1.5; }
+.rim-front {
+  fill: none;
+  stroke: url(#rimGradient);
+  stroke-width: 8.5;
+  stroke-linecap: round;
+}
+.rim-glint {
+  fill: none;
+  stroke: rgba(245, 203, 128, 0.62);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+.rim-rivets { fill: #c08a50; stroke: #563a23; stroke-width: 0.7; }
+.side-ring { fill: #3a4143; stroke: #171c1e; stroke-width: 2.2; }
+.side-ring-hole { fill: #101619; stroke: #835a37; stroke-width: 1; }
+.handle-lug { fill: #252d31; stroke: #11171a; stroke-width: 1.5; }
+.pot-foot { fill: #262e32; stroke: #101619; stroke-width: 1.8; }
+.foot-edge { fill: none; stroke: #0b1012; stroke-width: 2; }
+.potion { fill: url(#potionGradient); opacity: 0.56; }
+.surface {
+  fill: url(#surfaceGradient);
+  stroke: rgba(215, 242, 233, 0.72);
+  stroke-width: 1;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.surface-glint {
+  fill: none;
+  stroke: rgba(239, 255, 244, 0.82);
+  stroke-width: 2;
+  stroke-linecap: round;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.potion-ripple { fill: none; stroke: rgba(221, 246, 237, 0.48); stroke-width: 1.1; }
+#liquid { filter: url(#potionGlow); }
+.bubble,
+.top-bubble {
+  fill: rgba(222, 255, 232, 0.48);
+  stroke: rgba(250, 255, 252, 0.58);
+  stroke-width: 0.8;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.spoon-handle { fill: none; stroke: url(#woodGradient); stroke-width: 7; }
+.spoon-grain { fill: none; stroke: rgba(74, 42, 27, 0.62); stroke-width: 1; }
+.spoon-bowl { fill: #d0925f; stroke: #6d412b; stroke-width: 1.3; }
+.spoon-highlight { fill: none; stroke: rgba(255, 235, 196, 0.9); stroke-width: 1.2; stroke-linecap: round; }
+.spoon-underwater-handle {
+  fill: none;
+  stroke: #78a095;
+  stroke-width: 5.2;
+  opacity: 0.58;
+}
+.spoon-underwater-bowl {
+  fill: #78aa9b;
+  stroke: #b7d9cf;
+  stroke-width: 1.2;
+  opacity: 0.68;
+}
+.spoon-underwater-highlight {
+  fill: none;
+  stroke: rgba(225, 247, 240, 0.52);
+  stroke-width: 1.2;
+  stroke-linecap: round;
+}
+#spoon,
+#spoonUnderwater { transform-box: view-box; transform-origin: 95px 212px; }
+.flame {
   transform-box: fill-box;
   transform-origin: 50% 100%;
-  animation: float 3.6s ease-in-out infinite;
 }
-@keyframes float {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-6px); }
+.flame-outer { fill: url(#fireGradient); }
+.flame-inner { fill: #ffe682; }
+.ember { fill: #ffd166; transform-box: fill-box; transform-origin: center; }
+.log { fill: #5e3b26; stroke: #281b15; stroke-width: 1.5; }
+.log-right { fill: #74472b; }
+.log-ring { fill: none; stroke: #a36d3b; stroke-width: 1.3; }
+.steam {
+  fill: none;
+  stroke: url(#steamGradient);
+  stroke-width: 3.5;
+  stroke-linecap: round;
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center bottom;
 }
-.talking #witchBody {
-  animation: float 3.6s ease-in-out infinite, wiggle 0.28s ease-in-out infinite;
+.magic-mote {
+  fill: #d4ac5f;
+  filter: url(#moteGlow);
+  transform-box: fill-box;
+  transform-origin: center;
 }
-@keyframes wiggle {
-  0%, 100% { transform: rotate(-1.2deg); }
-  50% { transform: rotate(1.2deg); }
+.pot-rune {
+  fill: none;
+  stroke: rgba(115, 190, 176, 0.72);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: url(#runeGlow);
+}
+/* Animations only run while brewing (the .loading class). */
+.pet.loading #cauldronRig { animation: cauldron-breathe 4.6s ease-in-out infinite; }
+.pet.loading .cauldron-ground { animation: ground-breathe 4.6s ease-in-out infinite; }
+.pet.loading .bubble { animation: potion-bubble 2.5s cubic-bezier(0.35, 0, 0.65, 1) infinite; }
+.pet.loading .bubble.b2 { animation-delay: -0.7s; animation-duration: 2.9s; }
+.pet.loading .bubble.b3 { animation-delay: -1.5s; animation-duration: 2.1s; }
+.pet.loading .bubble.b4 { animation-delay: -2.1s; animation-duration: 3.2s; }
+.pet.loading .bubble.b5 { animation-delay: -0.35s; animation-duration: 2.25s; }
+.pet.loading .top-bubble { animation: top-bubble 2.2s ease-in infinite; }
+.pet.loading .top-bubble.t2 { animation-delay: -1.15s; animation-duration: 2.8s; }
+@keyframes potion-bubble {
+  0% { transform: translateY(8px) scale(0.42); opacity: 0; }
+  18% { opacity: 0.9; }
+  72% { opacity: 0.55; }
+  100% { transform: translateY(-52px) scale(1.12); opacity: 0; }
+}
+@keyframes top-bubble {
+  0%, 18% { transform: translateY(4px) scale(0.3); opacity: 0; }
+  35% { opacity: 0.8; }
+  78% { opacity: 0.45; }
+  100% { transform: translate(4px, -28px) scale(1); opacity: 0; }
+}
+.pet.loading .surface { animation: shimmer 2s ease-in-out infinite; }
+.pet.loading .surface-glint { animation: surface-glint 2.5s ease-in-out infinite; }
+@keyframes shimmer {
+  0%, 100% { transform: scaleX(0.98) translateX(-1px); opacity: 0.66; }
+  50% { transform: scaleX(1.045) translateX(1px); opacity: 0.96; }
+}
+@keyframes surface-glint {
+  0%, 100% { transform: translateX(-3px); opacity: 0.38; }
+  50% { transform: translateX(4px); opacity: 0.9; }
+}
+.pet.loading #spoon,
+.pet.loading #spoonUnderwater { animation: stir 2.65s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite; }
+@keyframes stir {
+  0%, 100% { transform: translateX(-1px) rotate(-2.5deg); }
+  45% { transform: translateX(2px) rotate(3.5deg); }
+  65% { transform: translateX(1px) rotate(2deg); }
+}
+.pet.loading .flame.f1 { animation: flame-flicker 0.62s ease-in-out infinite alternate; }
+.pet.loading .flame.f2 { animation: flame-flicker 0.48s ease-in-out -0.2s infinite alternate-reverse; }
+.pet.loading .flame.f3 { animation: flame-flicker 0.74s ease-in-out -0.35s infinite alternate; }
+.pet.loading .flame-inner { animation: flame-core 0.56s ease-in-out infinite alternate; }
+.pet.loading .ember { animation: ember-rise 1.8s ease-out infinite; }
+.pet.loading .ember.e2 { animation-delay: -0.9s; animation-duration: 2.2s; }
+.pet.loading .steam.s1 { animation: steam-rise 3.8s ease-in-out infinite; }
+.pet.loading .steam.s2 { animation: steam-rise 4.4s ease-in-out -1.9s infinite; }
+.pet.loading .steam.s3 { animation: steam-rise 3.4s ease-in-out -0.8s infinite; }
+.pet.loading .magic-mote { animation: mote-orbit 3.6s ease-in-out infinite; }
+.pet.loading .magic-mote.m2 { animation-delay: -1.2s; animation-duration: 4.2s; }
+.pet.loading .magic-mote.m3 { animation-delay: -2.4s; animation-duration: 3.2s; }
+.pet.loading .pot-rune { animation: rune-pulse 2.4s ease-in-out infinite; }
+@keyframes cauldron-arrive {
+  0% { opacity: 0; transform: translateY(16px) scale(0.78); }
+  70% { opacity: 1; transform: translateY(-2px) scale(1.025); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes cauldron-breathe {
+  0%, 100% { transform: translateY(0) rotate(-0.25deg); }
+  50% { transform: translateY(-2px) rotate(0.25deg); }
+}
+@keyframes ground-breathe {
+  0%, 100% { transform: scaleX(1); opacity: 0.5; }
+  50% { transform: scaleX(0.91); opacity: 0.35; }
+}
+@keyframes flame-flicker {
+  from { transform: scale(0.9, 0.88) skewX(-2deg); opacity: 0.72; }
+  to { transform: scale(1.08, 1.12) skewX(3deg); opacity: 1; }
+}
+@keyframes flame-core {
+  from { transform: scale(0.88, 0.92); opacity: 0.72; }
+  to { transform: scale(1.08, 1.16); opacity: 1; }
+}
+@keyframes ember-rise {
+  0% { transform: translateY(4px) scale(0.5); opacity: 0; }
+  20% { opacity: 0.95; }
+  100% { transform: translate(7px, -33px) scale(0.1); opacity: 0; }
+}
+@keyframes steam-rise {
+  0% { transform: translateY(9px) scale(0.8); stroke-dashoffset: 0; opacity: 0; }
+  25% { opacity: 0.46; }
+  75% { opacity: 0.25; }
+  100% { transform: translateY(-15px) scale(1.08); stroke-dashoffset: -25; opacity: 0; }
+}
+@keyframes mote-orbit {
+  0%, 100% { transform: translate(0, 4px) scale(0.65); opacity: 0.25; }
+  45% { transform: translate(5px, -6px) scale(1.1); opacity: 1; }
+  75% { transform: translate(-3px, -12px) scale(0.8); opacity: 0.48; }
+}
+@keyframes rune-pulse {
+  0%, 100% { opacity: 0.38; }
+  50% { opacity: 0.95; }
 }
 
-/* Thinking: slow ponder-sway + a thought bubble with pulsing dots. */
-.thinking #witchBody {
-  animation: float 3.6s ease-in-out infinite, ponder 1.8s ease-in-out infinite;
+/* ---------------- Hand-inked hedge mage fallback ---------------- */
+#witch * { stroke-linecap: round; stroke-linejoin: round; }
+#witch { overflow: visible; }
+.shadow { fill: rgba(3, 7, 12, 0.5); filter: blur(1px); }
+.back-cape { fill: url(#capeGradient); stroke: #07111d; stroke-width: 2; filter: url(#softDepth); }
+.cape-shadow { fill: rgba(2, 8, 16, 0.38); }
+.cape-fold { fill: none; stroke: rgba(93, 118, 144, 0.3); stroke-width: 1.2; }
+.cape-edge { fill: none; stroke: #31445d; stroke-width: 1.4; opacity: 0.55; }
+.leg { fill: #25272b; stroke: #111318; stroke-width: 1.7; }
+.boot-cuff { fill: url(#leatherGradient); stroke: #261a14; stroke-width: 1.5; }
+.boot { fill: url(#bootGradient); stroke: #1c1410; stroke-width: 1.9; filter: url(#softDepth); }
+.boot-panel { fill: none; stroke: rgba(196, 139, 82, 0.44); stroke-width: 1.2; }
+.boot-sole { fill: none; stroke: #1d1511; stroke-width: 2.2; }
+.tunic { fill: url(#tunicGradient); stroke: #101c19; stroke-width: 1.9; filter: url(#softDepth); }
+.tunic-panel { fill: rgba(16, 34, 31, 0.6); }
+.tunic-stitch { fill: none; stroke: rgba(112, 148, 115, 0.52); stroke-width: 0.9; stroke-dasharray: 2 2.6; }
+.tunic-hem { fill: none; stroke: rgba(116, 153, 117, 0.46); stroke-width: 1.15; }
+.sleeve { fill: url(#tunicGradient); stroke: #13231e; stroke-width: 1.7; }
+.shoulder-armor { fill: url(#armorGradient); stroke: #1b1715; stroke-width: 1.6; filter: url(#softDepth); }
+.armor-seam { fill: none; stroke: rgba(172, 137, 101, 0.42); stroke-width: 1; }
+.sleeve-cuff { fill: url(#leatherGradient); stroke: #241915; stroke-width: 1.4; }
+.bracer-panel { fill: rgba(29, 30, 31, 0.54); stroke: rgba(176, 132, 83, 0.45); stroke-width: 0.8; }
+.hand { fill: #d6aa74; stroke: #674a33; stroke-width: 1.1; }
+.glove { fill: #2c2927; stroke: #151413; stroke-width: 1.1; }
+.finger-line { fill: none; stroke: #3d2c22; stroke-width: 0.8; }
+.hair-back,
+.hair-side { fill: url(#hairGradient); stroke: #4c5868; stroke-width: 1.45; filter: url(#softDepth); }
+.hair-side { fill: url(#hairShadeGradient); }
+.hair-highlight { fill: none; stroke: rgba(244, 244, 238, 0.58); stroke-width: 1.05; }
+.ear { fill: #d6a875; stroke: #6e4e35; stroke-width: 1; }
+.face { fill: url(#faceGradient); stroke: #79573b; stroke-width: 1.4; filter: url(#softDepth); }
+.face-shadow { fill: rgba(113, 70, 38, 0.15); }
+.freckles { fill: #9a6a47; opacity: 0.58; }
+.scar { fill: none; stroke: #ad7558; stroke-width: 1; opacity: 0.72; }
+.brow { fill: none; stroke: #332c25; stroke-width: 1.8; }
+.pupil { fill: url(#eyeGradient); stroke: #020305; stroke-width: 0.8; }
+.eye-glint { fill: #fffdf4; }
+.eye-glint-small { opacity: 0.68; }
+.nose { fill: none; stroke: #9b724d; stroke-width: 1.1; }
+.closed-smile { fill: none; stroke: #704737; stroke-width: 1.35; }
+.mouth-cavity { fill: #3c2728; stroke: #1f1718; stroke-width: 1; }
+.teeth { fill: #f6e8c9; }
+.tongue { fill: #bd6f64; }
+.tongue-line { fill: none; stroke: #76413f; stroke-width: 0.8; }
+.neck-shadow { fill: rgba(91, 62, 35, 0.22); }
+.hat-cone { fill: url(#hatGradient); stroke: #07111d; stroke-width: 2.1; filter: url(#softDepth); }
+.hat-fold { fill: none; stroke: rgba(98, 121, 151, 0.5); stroke-width: 1.2; }
+.hat-highlight { fill: none; stroke: rgba(140, 164, 193, 0.36); stroke-width: 1.1; }
+.hat-patch { fill: #a37840; stroke: #49361f; stroke-width: 1.2; }
+.hat-stitch { fill: none; stroke: #e1bd72; stroke-width: 1; opacity: 0.84; }
+.hat-band { fill: #1b2534; stroke: #111721; stroke-width: 1.3; }
+.hat-brim { fill: url(#brimGradient); stroke: #07111d; stroke-width: 2; filter: url(#softDepth); }
+.brim-highlight { fill: none; stroke: rgba(123, 142, 163, 0.5); stroke-width: 1.25; }
+.brim-edge { fill: none; stroke: rgba(5, 12, 21, 0.66); stroke-width: 1.4; }
+.hat-seat-shadow { fill: rgba(34, 29, 23, 0.2); }
+.hat-brim-front { fill: url(#brimGradient); stroke: #111821; stroke-width: 1.7; }
+.hat-buckle { fill: url(#metalGradient); stroke: #3c2617; stroke-width: 1; }
+.hat-buckle-hole { fill: #172131; stroke: #5e3c1f; stroke-width: 0.7; }
+.charm-string { fill: none; stroke: url(#metalGradient); stroke-width: 1.6; }
+.charm-ring { fill: none; stroke: #c4944b; stroke-width: 1.4; }
+.moon-charm { fill: url(#metalGradient); stroke: #684820; stroke-width: 0.9; filter: url(#starGlow); }
+.strap { fill: none; stroke: url(#leatherGradient); stroke-width: 4; }
+.strap-stitch { fill: none; stroke: rgba(216, 169, 106, 0.58); stroke-width: 0.75; stroke-dasharray: 2 2.5; }
+.satchel { fill: url(#leatherGradient); stroke: #241a15; stroke-width: 1.6; filter: url(#softDepth); }
+.satchel-flap { fill: #68462e; stroke: #2e2018; stroke-width: 1.2; }
+.satchel-stitch { fill: none; stroke: rgba(214, 163, 101, 0.56); stroke-width: 0.8; stroke-dasharray: 2 2; }
+.satchel-stud,
+.belt-buckle { fill: url(#metalGradient); stroke: #4e321c; stroke-width: 0.85; }
+.belt { fill: none; stroke: url(#leatherGradient); stroke-width: 5; }
+.buckle-hole { fill: #2b201a; stroke: #5d3a20; stroke-width: 0.65; }
+.vial-glass { fill: rgba(205, 233, 226, 0.34); stroke: #b9cbc7; stroke-width: 0.9; }
+.vial-green .vial-liquid { fill: url(#greenPotion); }
+.vial-blue .vial-liquid { fill: url(#bluePotion); }
+.vial-liquid { stroke: rgba(16, 47, 43, 0.55); stroke-width: 0.6; }
+.vial-cork { fill: #99734a; stroke: #463220; stroke-width: 0.7; }
+.vial-shine { fill: none; stroke: rgba(255, 255, 244, 0.72); stroke-width: 0.85; }
+.sparkle { fill: #d0aa61; filter: url(#starGlow); transform-box: fill-box; transform-origin: center; }
+.leaf-mote { fill: #78a694; stroke: #2f584f; stroke-width: 0.8; }
+
+#witchFloat,
+#witchBody,
+#headGroup,
+#hatCrown,
+#hatCharm,
+#leftArm,
+#rightArm,
+#cloakGroup { will-change: transform; }
+#witchFloat { transform-box: view-box; transform-origin: 50% 94%; animation: witch-float 6.4s cubic-bezier(0.42, 0, 0.38, 1) infinite; }
+#witchBody { transform-box: view-box; transform-origin: 50% 92%; animation: witch-breathe 4.8s ease-in-out infinite; }
+#headGroup { transform-box: fill-box; transform-origin: 50% 78%; animation: head-idle 7.2s ease-in-out infinite; }
+#hatCrown { transform-box: fill-box; transform-origin: 50% 96%; animation: hat-sway 4.9s ease-in-out infinite; }
+#hatCharm { transform-box: fill-box; transform-origin: 20% 0%; animation: charm-swing 2.8s ease-in-out infinite; }
+#leftArm, #rightArm { transform-box: fill-box; }
+#leftArm { transform-origin: 78% 10%; animation: arm-idle-left 5.6s ease-in-out infinite; }
+#rightArm { transform-origin: 22% 10%; animation: arm-idle-right 6.2s ease-in-out -2.4s infinite; }
+#cloakGroup { transform-box: fill-box; transform-origin: 50% 20%; }
+#sparkles { opacity: 0.74; }
+.sparkle-one { animation: sparkle-drift 3.4s ease-in-out infinite; }
+.sparkle-two { animation: sparkle-drift 4.1s ease-in-out -1.6s infinite reverse; }
+
+@keyframes witch-float {
+  0%, 100% { transform: translateY(0) rotate(-0.35deg); }
+  28% { transform: translateY(-3px) rotate(0.2deg); }
+  56% { transform: translateY(-6px) rotate(0.45deg); }
+  78% { transform: translateY(-2px) rotate(-0.15deg); }
 }
-@keyframes ponder {
-  0%, 100% { transform: rotate(-2deg); }
-  50% { transform: rotate(2deg); }
+@keyframes witch-breathe {
+  0%, 100% { transform: scale(1, 1); }
+  50% { transform: scale(1.012, 0.992); }
 }
+@keyframes head-idle {
+  0%, 18%, 100% { transform: rotate(0); }
+  42% { transform: rotate(-1.1deg); }
+  66% { transform: rotate(0.8deg); }
+}
+@keyframes hat-sway {
+  0%, 100% { transform: rotate(-0.8deg); }
+  35% { transform: rotate(1.8deg) translateY(-0.4px); }
+  70% { transform: rotate(-1.4deg); }
+}
+@keyframes charm-swing {
+  0%, 100% { transform: rotate(-7deg); }
+  50% { transform: rotate(8deg); }
+}
+@keyframes arm-idle-left {
+  0%, 100% { transform: rotate(0); }
+  50% { transform: rotate(1.5deg); }
+}
+@keyframes arm-idle-right {
+  0%, 100% { transform: rotate(0); }
+  50% { transform: rotate(-1.8deg); }
+}
+@keyframes sparkle-drift {
+  0%, 100% { transform: translateY(2px) scale(0.68); opacity: 0.2; }
+  50% { transform: translateY(-4px) scale(1.08) rotate(12deg); opacity: 0.9; }
+}
+
+/* Talking distributes motion across nested pieces, avoiding transform clashes. */
+.talking #witchFloat { animation: talk-float 1.08s ease-in-out infinite; }
+.talking #witchBody { animation: talk-body 1.46s ease-in-out infinite; }
+.talking #headGroup { animation: talk-head 1.15s ease-in-out infinite; }
+.talking #hatCrown { animation: talk-hat 1.36s ease-in-out infinite; }
+.talking #leftArm { animation: talk-arm-left 1.72s ease-in-out infinite; }
+.talking #rightArm { animation: talk-arm-right 1.72s ease-in-out -0.86s infinite; }
+@keyframes talk-float {
+  0%, 100% { transform: translateY(-1px); }
+  30% { transform: translateY(-4px); }
+  64% { transform: translateY(-2px); }
+}
+@keyframes talk-body {
+  0%, 100% { transform: rotate(-0.75deg) scale(1); }
+  50% { transform: rotate(0.85deg) scale(1.012, 0.995); }
+}
+@keyframes talk-head {
+  0%, 100% { transform: rotate(-0.9deg) translateY(0); }
+  45% { transform: rotate(1.2deg) translateY(-1px); }
+}
+@keyframes talk-hat {
+  0%, 100% { transform: rotate(-1.8deg); }
+  50% { transform: rotate(2.5deg) translateY(-1px); }
+}
+@keyframes talk-arm-left {
+  0%, 100% { transform: rotate(0); }
+  50% { transform: rotate(4deg); }
+}
+@keyframes talk-arm-right {
+  0%, 100% { transform: rotate(0); }
+  50% { transform: rotate(-4.5deg); }
+}
+
+/* Thinking: a slower asymmetrical ponder with a hand-to-chin beat. */
+.thinking #witchFloat { animation: think-float 3.1s ease-in-out infinite; }
+.thinking #witchBody { animation: think-body 2.7s ease-in-out infinite; }
+.thinking #headGroup { animation: think-head 2.6s ease-in-out infinite; }
+.thinking #rightArm { animation: think-arm 2.6s ease-in-out infinite; }
+@keyframes think-float {
+  0%, 100% { transform: translateY(-1px); }
+  50% { transform: translateY(-5px); }
+}
+@keyframes think-body {
+  0%, 100% { transform: rotate(-1.5deg); }
+  50% { transform: rotate(1deg); }
+}
+@keyframes think-head {
+  0%, 100% { transform: rotate(-3deg) translateY(0); }
+  50% { transform: rotate(1.5deg) translateY(-1px); }
+}
+@keyframes think-arm {
+  0%, 100% { transform: rotate(-4deg); }
+  50% { transform: rotate(-10deg) translate(-2px, -2px); }
+}
+
+/* Randomly scheduled accents, chosen by the fallback renderer. */
+.gesture-wave #rightArm { animation: witch-wave 1.12s cubic-bezier(0.45, 0, 0.25, 1) both; }
+.gesture-perk #headGroup { animation: witch-perk 0.9s cubic-bezier(0.2, 1.25, 0.35, 1) both; }
+.gesture-swish #cloakGroup { animation: cloak-swish 1.25s ease-in-out both; }
+.gesture-emphasis #leftArm { animation: emphasize-left 0.9s ease-in-out both; }
+.gesture-emphasis #rightArm { animation: emphasize-right 0.9s ease-in-out both; }
+.gesture-nod #headGroup { animation: witch-nod 0.9s ease-in-out both; }
+.gesture-think-tap #rightArm { animation: think-tap 0.9s ease-in-out both; }
+@keyframes witch-wave {
+  0%, 100% { transform: rotate(0); }
+  22% { transform: rotate(-24deg) translate(-2px, -4px); }
+  42% { transform: rotate(-13deg) translate(-1px, -3px); }
+  62% { transform: rotate(-26deg) translate(-2px, -4px); }
+  82% { transform: rotate(-11deg) translate(-1px, -2px); }
+}
+@keyframes witch-perk {
+  0%, 100% { transform: rotate(0) translateY(0); }
+  35% { transform: rotate(2.4deg) translateY(-3px); }
+  62% { transform: rotate(-0.8deg) translateY(-1px); }
+}
+@keyframes cloak-swish {
+  0%, 100% { transform: skewX(0) scaleX(1); }
+  35% { transform: skewX(-2.6deg) scaleX(0.985); }
+  68% { transform: skewX(2deg) scaleX(1.012); }
+}
+@keyframes emphasize-left {
+  0%, 100% { transform: rotate(0); }
+  40% { transform: rotate(10deg) translate(2px, -3px); }
+}
+@keyframes emphasize-right {
+  0%, 100% { transform: rotate(0); }
+  40% { transform: rotate(-10deg) translate(-2px, -3px); }
+}
+@keyframes witch-nod {
+  0%, 100% { transform: rotate(0) translateY(0); }
+  32% { transform: rotate(1deg) translateY(2px); }
+  58% { transform: rotate(-1deg) translateY(-1px); }
+}
+@keyframes think-tap {
+  0%, 100% { transform: rotate(-4deg); }
+  35%, 70% { transform: rotate(-12deg) translate(-2px, -3px); }
+  52%, 86% { transform: rotate(-8deg) translate(-1px, -1px); }
+}
+
+#eyes {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 70ms ease-in-out;
+}
+#eyes.blink { transform: scaleY(0.07); }
+#pupils {
+  transform: translate(var(--look-x, 0px), var(--look-y, 0px));
+  transition: transform 0.42s cubic-bezier(0.2, 0.75, 0.25, 1);
+}
+#mouthRig { transform-box: view-box; transform-origin: 100px 149px; will-change: transform; }
+
+/* Thought bubble and its independently pulsing dots. */
 #thoughtBubble { opacity: 0; transition: opacity 0.25s ease; }
 .thinking #thoughtBubble { opacity: 1; }
 .tb-cloud {
-  fill: rgba(255, 255, 255, 0.94);
-  stroke: rgba(168, 85, 247, 0.55);
+  fill: rgba(233, 214, 171, 0.96);
+  stroke: #354658;
   stroke-width: 1.5;
 }
-.tb-trail { fill: rgba(255, 255, 255, 0.85); }
-.tb-dot { fill: var(--purple); opacity: 0.25; }
-.thinking .tb-dot { animation: tbPulse 1.2s ease-in-out infinite; }
-.thinking .tb-dot.d2 { animation-delay: 0.2s; }
-.thinking .tb-dot.d3 { animation-delay: 0.4s; }
+.tb-trail { fill: #dfc58e; stroke: #354658; stroke-width: 0.8; }
+.tb-rune { fill: none; stroke: #48776e; stroke-width: 1.8; }
+.thinking .tb-rune { animation: tbPulse 1.2s ease-in-out infinite; }
 @keyframes tbPulse {
   0%, 60%, 100% { opacity: 0.25; }
   30% { opacity: 1; }
@@ -171,21 +593,38 @@ html, body {
   0% { opacity: 1; transform: none; }
   100% { opacity: 0; transform: translate(30px, -40px) rotate(42deg) scale(1.12); }
 }
-.tape-base { fill: #b9bcc6; stroke: #8d919e; stroke-width: 1; }
-.tape-line { stroke: #a3a7b3; stroke-width: 1.2; stroke-linecap: round; }
-.tape-edge { fill: #b9bcc6; }
+.tape-base { fill: #c7a96e; stroke: #765a30; stroke-width: 1; }
+.tape-line { stroke: #a28350; stroke-width: 1.2; stroke-linecap: round; }
+.tape-edge { fill: #c7a96e; }
 
-.face { fill: var(--skin); }
-.cheek { fill: #ff9fb2; opacity: 0.55; }
-.eye { fill: #2b1a4a; transform-box: fill-box; transform-origin: center; transition: transform 0.08s; }
-#eyes.blink .eye { transform: scaleY(0.1); }
-#mouth { fill: #71163c; }
-.cloak { fill: var(--purple); }
-.cone { fill: var(--purple-2); }
-.band { fill: #4c1d95; }
-.brim { fill: #2a1550; }
-.star { fill: #fde68a; }
-.shadow { fill: rgba(0, 0, 0, 0.28); }
+@media (prefers-reduced-motion: reduce) {
+  .pet.loading .cauldron,
+  .pet.loading #cauldronRig,
+  .pet.loading .cauldron-ground,
+  .pet.loading .bubble,
+  .pet.loading .top-bubble,
+  .pet.loading .surface,
+  .pet.loading .surface-glint,
+  .pet.loading #spoon,
+  .pet.loading #spoonUnderwater,
+  .pet.loading .flame,
+  .pet.loading .ember,
+  .pet.loading .steam,
+  .pet.loading .magic-mote,
+  .pet.loading .pot-rune,
+  #witchFloat,
+  #witchBody,
+  #headGroup,
+  #hatCrown,
+  #hatCharm,
+  #leftArm,
+  #rightArm,
+  #cloakGroup,
+  .sparkle {
+    animation: none !important;
+    transition: none !important;
+  }
+}
 
 /* ---------------- Panel (speech bubble) ----------------
    The panel is its OWN transparent window, sized 320x260 plus a 16px margin
