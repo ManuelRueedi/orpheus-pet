@@ -697,7 +697,9 @@ print(json.dumps({
             throw "Frozen backend health smoke failed. stdout: $smokeOut stderr: $smokeErr"
         }
         $voicesPayload = $voicesResponse.Content | ConvertFrom-Json
-        if ($voicesPayload.status -ne 'ok' -or @($voicesPayload.voices).Count -eq 0) {
+        if ($voicesPayload.status -ne 'ok' -or
+                $null -eq $voicesPayload.voices -or
+                @($voicesPayload.voices).Count -eq 0) {
             throw "Frozen backend returned an invalid voices response: $($voicesResponse.Content)"
         }
     } finally {

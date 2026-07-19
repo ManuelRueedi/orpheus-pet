@@ -312,7 +312,11 @@ jobs:
             throw "Unsafe runtime archive filename: $archiveName"
           }
           $archivePath = Join-Path $env:RUNTIME_OUTPUT_DIR $archiveName
-          $parts = @($archive.parts)
+          # Windows PowerShell 5.1 reports @($null).Count as 1. An unsplit
+          # sidecar intentionally omits `parts`, so normalize that case before
+          # choosing the single-archive versus multipart validation branch.
+          $parts = @()
+          if ($null -ne $archive.parts) { $parts = @($archive.parts) }
           if ($parts.Count -eq 0) {
             if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
               throw "Missing runtime archive: $archivePath"
