@@ -60,10 +60,13 @@ Quit from the tray (or `taskkill` llama-server/python) for a full teardown.
 Each Orpheus language is a **separate ~3.5 GB fine-tuned model** (the base model
 is English-only), loaded one at a time. The panel's **Language** dropdown lists
 all supported languages (EN/FR/DE/ES/IT/KO/HI/ZH). Language and model size are
-staged together: change either dropdown in any order, then press **Switch** or
-**Download & switch** once the final pair is right. Only that pair is loaded or
-downloaded. The picker area then becomes an in-panel **progress bar + Stop
-button** (with a filling cauldron over the witch) while it fetches from
+staged together in the same row: change either dropdown in any order, then
+press **Switch** or **Download & switch** once the final pair is right. On a
+fresh release install, those selectors are usable before the runtime exists;
+**Set up speech** installs the verified runtime and then that exact model in one
+continuous operation. Only that pair is loaded or downloaded. The picker area
+then becomes an in-panel **progress bar + Stop button** (with a filling cauldron
+over the witch) while it fetches from
 `huggingface.co/lex-au/<model>` and hot-swaps llama-server. **Stop** cancels the
 operation and restores the previous model when loading already began. Downloaded
 models are cached and the successful pair persists across restarts. Spanish &

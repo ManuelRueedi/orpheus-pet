@@ -22,16 +22,18 @@ Highlight text in *any* app, hit a hotkey, and she reads it. 25 voices, 8 langua
 
 ### End-user install
 
-`Orpheus-Pet-Setup.exe` is the no-tooling path: install the pet, open its panel,
-and approve the one-time speech-runtime download. The app automatically chooses
-the NVIDIA or CPU pack, verifies the archive and every extracted file, activates
-it, then asks for the first voice model. Python, Node, pnpm, Rust, Git, and
-terminal-launched servers are not needed.
+Download **[`Orpheus-Pet-Setup.exe`](https://github.com/ManuelRueedi/orpheus-pet/releases/latest/download/Orpheus-Pet-Setup.exe)**
+and run it. The installer is per-user, so it does not need administrator access.
+Python, Node, pnpm, Rust, Git, and terminal-launched servers are not needed.
 
-The installer and matching runtime assets still need to be published to a
-GitHub release before that path can be downloaded by users; until then, build
-from source. See [Windows runtime packs](docs/runtime-packs.md) for building and
-publishing those release assets.
+On first launch, open the panel, choose **language + model size**, then press
+**Set up speech** once. The app automatically chooses the NVIDIA or CPU runtime,
+shows the combined download size, verifies every runtime file, and immediately
+downloads and loads that exact voice selection in the same progress flow.
+
+The release workflow builds the installer plus CPU/CUDA runtime assets when a
+`v*` tag is pushed. Until the first tagged release exists, build from source.
+Release details are in [Windows runtime packs](docs/runtime-packs.md).
 
 ### Build from source
 
@@ -69,7 +71,7 @@ The script is just the manual steps in one place; run them yourself if you prefe
 # 1. TTS backend (Python) — PyTorch is installed separately (CUDA wheel)
 cd Orpheus-FastAPI
 python -m venv venv
-venv\Scripts\python -m pip install torch --index-url https://download.pytorch.org/whl/cu124
+venv\Scripts\python -m pip install torch --index-url https://download.pytorch.org/whl/cu128
 venv\Scripts\pip install -r requirements.txt
 cd ..
 
@@ -87,13 +89,15 @@ from the bundled default if it's missing, so there's no copy step. Edit that fil
 afterwards to tune `quant` / `llamaArgs` for your GPU (see *Lower-spec machines* below).
 </details>
 
-**First run:** right-click the witch → choose a language and model size → confirm
-the combined choice. She downloads only that voice model (~1.5–3.8 GB, with a
-bubbling cauldron progress bar 🫧) and starts talking. That's it.
+**First run:** right-click the witch → choose a language and model size → press
+**Set up speech**. A release install prepares the runtime and only that selected
+voice model (~1.5–3.8 GB) in one continuous, cancellable progress flow. From a
+source checkout, the setup script already prepared the runtime, so only the
+voice model is needed.
 
-To ship a real app: `pnpm tauri build` → an installer/exe lands in
-`orpheus-pet/src-tauri/target/release/`. Launch that once and she'll **auto-start
-at login** from then on.
+To build the installer locally: `pnpm tauri build` → the NSIS setup executable
+lands under `orpheus-pet/src-tauri/target/release/bundle/nsis/`. Launch that once
+and she'll **auto-start at login** from then on.
 
 ---
 

@@ -677,9 +677,10 @@ html, body {
   color: var(--panel-fg);
 }
 
-/* Size dropdown carries a longer label ("Best quality · ~6 GB VRAM") — smaller
-   text so it fits without truncating; extra padding keeps it the row's height. */
-#quality { font-size: 13px; padding: 9px 6px; }
+/* Language + size form the staged model target. Give the descriptive size label
+   more room while keeping both controls visibly part of the same row. */
+.model-row #lang { flex: 1; }
+.model-row #quality { flex: 1.2; font-size: 13px; padding: 9px 6px; }
 
 .btn {
   border: none;

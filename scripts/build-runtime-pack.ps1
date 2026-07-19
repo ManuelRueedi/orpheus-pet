@@ -23,6 +23,11 @@
     Optional prebuilt PyInstaller one-folder directory. Intended for CI reuse;
     when omitted, the backend is built from Orpheus-FastAPI/venv.
 
+.PARAMETER ReleaseAssetsOnly
+    Emits only the release ZIP/parts and sidecars. This CI-oriented mode moves
+    owned PyInstaller output into the pack and removes owned work trees as soon
+    as they are no longer needed, avoiding a duplicate unpacked staging tree.
+
 .EXAMPLE
     .\scripts\build-runtime-pack.ps1 -Version 0.1.0 -Flavor cuda
 
@@ -47,6 +52,7 @@ param(
     [string] $BackendSource,
     [string] $BackendOnedir,
     [string] $OutputRoot,
+    [switch] $ReleaseAssetsOnly,
     [switch] $Force
 )
 
@@ -150,6 +156,89 @@ function Write-Utf8NoBomAtomic {
     }
 }
 
+function Split-ArchiveForRelease {
+    param(
+        [string] $SourcePath,
+        [string] $DestinationDirectory,
+        [string] $PartBaseName,
+        [long] $MaximumPartBytes
+    )
+    if ($MaximumPartBytes -le 0) { throw 'MaximumPartBytes must be positive' }
+
+    $sourceFile = Get-Item -LiteralPath $SourcePath
+    $requiredParts = [Math]::Ceiling($sourceFile.Length / [double] $MaximumPartBytes)
+    if ($requiredParts -gt 999) {
+        throw "Archive requires $requiredParts parts; the .partNNN format supports at most 999"
+    }
+    $partCount = [int] $requiredParts
+
+    $records = @()
+    $createdPaths = New-Object 'System.Collections.Generic.List[string]'
+    $sourceStream = [System.IO.File]::Open(
+        $sourceFile.FullName,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+    $buffer = New-Object byte[] (8 * 1024 * 1024)
+    try {
+        for ($partNumber = 1; $partNumber -le $partCount; $partNumber++) {
+            $partFileName = '{0}.part{1:D3}' -f $PartBaseName, $partNumber
+            $partPath = Join-Path $DestinationDirectory $partFileName
+            $partStream = [System.IO.File]::Open(
+                $partPath,
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::None
+            )
+            [void] $createdPaths.Add($partPath)
+            try {
+                [long] $remaining = [Math]::Min(
+                    $MaximumPartBytes,
+                    $sourceStream.Length - $sourceStream.Position
+                )
+                while ($remaining -gt 0) {
+                    $readSize = [int] [Math]::Min([long] $buffer.Length, $remaining)
+                    $bytesRead = $sourceStream.Read($buffer, 0, $readSize)
+                    if ($bytesRead -le 0) {
+                        throw "Unexpected end of archive while writing $partFileName"
+                    }
+                    $partStream.Write($buffer, 0, $bytesRead)
+                    $remaining -= $bytesRead
+                }
+            } finally {
+                $partStream.Dispose()
+            }
+
+            $partFile = Get-Item -LiteralPath $partPath
+            if ($partFile.Length -le 0 -or $partFile.Length -gt $MaximumPartBytes) {
+                throw "Invalid release part size for $partFileName`: $($partFile.Length)"
+            }
+            $partHash = (Get-FileHash -LiteralPath $partPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $records += [pscustomobject][ordered]@{
+                fileName = $partFile.Name
+                byteSize = [long] $partFile.Length
+                sha256 = $partHash
+            }
+        }
+
+        [long] $splitBytes = ($records | Measure-Object -Property byteSize -Sum).Sum
+        if ($splitBytes -ne $sourceFile.Length -or $sourceStream.Position -ne $sourceFile.Length) {
+            throw "Release parts contain $splitBytes bytes; expected $($sourceFile.Length)"
+        }
+        return $records
+    } catch {
+        foreach ($createdPath in $createdPaths) {
+            if (Test-Path -LiteralPath $createdPath) {
+                Remove-Item -LiteralPath $createdPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        throw
+    } finally {
+        $sourceStream.Dispose()
+    }
+}
+
 function Test-PathWithin {
     param([string] $ChildPath, [string] $ParentPath)
     $child = [System.IO.Path]::GetFullPath($ChildPath).TrimEnd('\', '/')
@@ -159,6 +248,20 @@ function Test-PathWithin {
         $parent + [System.IO.Path]::DirectorySeparatorChar,
         [System.StringComparison]::OrdinalIgnoreCase
     )
+}
+
+function Remove-OwnedWorkPath {
+    param([string] $Path, [string] $WorkRoot)
+    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+    $fullWorkRoot = [System.IO.Path]::GetFullPath($WorkRoot).TrimEnd('\', '/')
+    if ($fullPath.Equals($fullWorkRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-PathWithin -ChildPath $fullPath -ParentPath $fullWorkRoot)) {
+        throw "Refusing to clean a path outside the owned work tree: $fullPath"
+    }
+    if (Test-Path -LiteralPath $fullPath) {
+        Assert-NoReparsePoints -Path $fullPath -Description 'owned work cleanup target'
+        Remove-Item -LiteralPath $fullPath -Recurse -Force
+    }
 }
 
 function Get-PeArchitecture {
@@ -309,9 +412,18 @@ $stagingPath = Join-Path $OutputRoot "runtime\$Version\$Flavor"
 $archivePath = Join-Path $OutputRoot "$packId.zip"
 $archiveManifestPath = Join-Path $OutputRoot "$packId.manifest.json"
 $stableManifestPath = Join-Path $OutputRoot "orpheus-runtime-windows-$Architecture-$Flavor.manifest.json"
+$archivePartNamePattern = '^' + [regex]::Escape("$packId.zip.part") + '[0-9]{3}$'
+$existingArchiveParts = @()
+if (Test-Path -LiteralPath $OutputRoot -PathType Container) {
+    $existingArchiveParts = @(Get-ChildItem -LiteralPath $OutputRoot -Force -File |
+        Where-Object { $_.Name -match $archivePartNamePattern } |
+        ForEach-Object { $_.FullName })
+}
 
-$existingOutputs = @($stagingPath, $archivePath, $archiveManifestPath) |
-    Where-Object { Test-Path -LiteralPath $_ }
+$outputCandidates = @($archivePath, $archiveManifestPath)
+if (-not $ReleaseAssetsOnly) { $outputCandidates += $stagingPath }
+$existingOutputs = @($outputCandidates |
+        Where-Object { Test-Path -LiteralPath $_ }) + $existingArchiveParts
 if ($existingOutputs.Count -gt 0 -and -not $Force) {
     throw "Output already exists. Choose another version/output or pass -Force: $($existingOutputs -join ', ')"
 }
@@ -330,6 +442,7 @@ New-Item -ItemType Directory -Force -Path $packLlama | Out-Null
 try {
     Write-Step 'Building frozen backend'
     $builtBackend = $null
+    $builtBackendIsOwned = $false
     if (-not [string]::IsNullOrWhiteSpace($BackendOnedir)) {
         Assert-Directory -Path $BackendOnedir -Description 'prebuilt backend one-folder directory'
         Assert-File -Path (Join-Path $BackendOnedir 'orpheus-backend.exe') `
@@ -364,7 +477,8 @@ print(json.dumps({
     "torchCuda": torch.version.cuda,
 }))
 '@
-        $probeOutput = (& $PythonPath -c $probeCode | Out-String).Trim()
+        $probeLines = & $PythonPath -c $probeCode
+        $probeOutput = ($probeLines | Out-String).Trim()
         if ($LASTEXITCODE -ne 0) { throw "Python/Torch build-environment probe failed" }
         try { $probe = $probeOutput | ConvertFrom-Json } catch {
             throw "Python/Torch build-environment probe returned invalid JSON: $probeOutput"
@@ -380,8 +494,8 @@ print(json.dumps({
             throw "CPU flavor requires a CPU-only PyTorch environment (found CUDA $($probe.torchCuda))"
         }
 
-        $pyInstallerVersion = (& $PythonPath -c 'import PyInstaller; print(PyInstaller.__version__)' |
-            Out-String).Trim()
+        $pyInstallerVersionLines = & $PythonPath -c 'import PyInstaller; print(PyInstaller.__version__)'
+        $pyInstallerVersion = ($pyInstallerVersionLines | Out-String).Trim()
         if ($LASTEXITCODE -ne 0) {
             throw "PyInstaller is missing. Run: `"$PythonPath`" -m pip install -r `"$buildRequirements`""
         }
@@ -418,6 +532,7 @@ print(json.dumps({
         & $PythonPath @pyInstallerArgs
         if ($LASTEXITCODE -ne 0) { throw "PyInstaller backend build failed (exit $LASTEXITCODE)" }
         $builtBackend = Join-Path $pyInstallerDist 'orpheus-backend'
+        $builtBackendIsOwned = $true
         Assert-File -Path (Join-Path $builtBackend 'orpheus-backend.exe') `
             -Description 'built orpheus-backend executable'
         $backendMetadata = [pscustomobject][ordered]@{
@@ -451,10 +566,19 @@ print(json.dumps({
     }
 
     Get-ChildItem -LiteralPath $builtBackend -Force | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination $packBackend -Recurse -Force
+        if ($ReleaseAssetsOnly -and $builtBackendIsOwned) {
+            Move-Item -LiteralPath $_.FullName -Destination $packBackend -Force
+        } else {
+            Copy-Item -LiteralPath $_.FullName -Destination $packBackend -Recurse -Force
+        }
     }
     Assert-PeArchitecture -Path (Join-Path $packBackend 'orpheus-backend.exe') `
         -Expected $Architecture
+    if ($ReleaseAssetsOnly -and $builtBackendIsOwned) {
+        foreach ($ownedBuildPath in @($pyInstallerDist, $pyInstallerWork, $pyInstallerSpec)) {
+            Remove-OwnedWorkPath -Path $ownedBuildPath -WorkRoot $workRoot
+        }
+    }
 
     # app.py resolves these against its working directory. The entry point moves
     # there before importing app; keeping them outside the executable also makes
@@ -470,8 +594,8 @@ print(json.dumps({
 
     Write-Step 'Prefetching pinned SNAC decoder'
     $packSnacModel = Join-Path $packBackend 'snac-model'
-    $snacMetadataOutput = (& $PythonPath $snacPrefetch --model-dir $packSnacModel |
-        Out-String).Trim()
+    $snacMetadataLines = & $PythonPath $snacPrefetch --model-dir $packSnacModel
+    $snacMetadataOutput = ($snacMetadataLines | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) {
         throw "SNAC decoder prefetch failed (exit $LASTEXITCODE)"
     }
@@ -511,13 +635,86 @@ print(json.dumps({
     $stagedLlamaServer = Join-Path $packLlama 'llama-server.exe'
     Push-Location $packLlama
     try {
-        $llamaVersionOutput = (& $stagedLlamaServer --version 2>&1 | Out-String).Trim()
+        $llamaVersionLines = & $stagedLlamaServer --version 2>&1
+        $llamaVersionOutput = ($llamaVersionLines | Out-String).Trim()
         $llamaVersionExitCode = $LASTEXITCODE
     } finally {
         Pop-Location
     }
     if ($llamaVersionExitCode -ne 0) {
         throw "Staged llama-server failed to load (exit $llamaVersionExitCode): $llamaVersionOutput"
+    }
+
+    Write-Step 'Smoke-testing frozen backend'
+    $backendSmokeExe = Join-Path $packBackend 'orpheus-backend.exe'
+    $backendSmokeOut = Join-Path $workRoot 'backend-smoke.stdout.log'
+    $backendSmokeErr = Join-Path $workRoot 'backend-smoke.stderr.log'
+    $backendSmokeProcess = $null
+    $portProbe = [System.Net.Sockets.TcpListener]::new(
+        [System.Net.IPAddress]::Loopback,
+        0
+    )
+    $portProbe.Start()
+    $backendSmokePort = ([System.Net.IPEndPoint] $portProbe.LocalEndpoint).Port
+    $portProbe.Stop()
+    $previousApiUrl = [Environment]::GetEnvironmentVariable('ORPHEUS_API_URL', 'Process')
+    $previousPythonUtf8 = [Environment]::GetEnvironmentVariable('PYTHONUTF8', 'Process')
+    try {
+        # app.py reads this process value because a release pack intentionally
+        # has no mutable .env yet. The voices endpoint does not call llama.
+        $env:ORPHEUS_API_URL = 'http://127.0.0.1:9/v1/completions'
+        $env:PYTHONUTF8 = '1'
+        $backendSmokeProcess = Start-Process `
+            -FilePath $backendSmokeExe `
+            -ArgumentList @('--host', '127.0.0.1', '--port', $backendSmokePort) `
+            -WorkingDirectory $packBackend `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $backendSmokeOut `
+            -RedirectStandardError $backendSmokeErr `
+            -PassThru
+        $smokeDeadline = [DateTime]::UtcNow.AddMinutes(2)
+        $voicesResponse = $null
+        while ([DateTime]::UtcNow -lt $smokeDeadline) {
+            if ($backendSmokeProcess.HasExited) { break }
+            try {
+                $voicesResponse = Invoke-WebRequest `
+                    -UseBasicParsing `
+                    -Uri "http://127.0.0.1:$backendSmokePort/v1/audio/voices" `
+                    -TimeoutSec 3
+                if ($voicesResponse.StatusCode -eq 200) { break }
+            } catch {
+                $voicesResponse = $null
+            }
+            Start-Sleep -Milliseconds 500
+        }
+        if ($null -eq $voicesResponse -or $voicesResponse.StatusCode -ne 200) {
+            $smokeOut = if (Test-Path -LiteralPath $backendSmokeOut) {
+                Get-Content -LiteralPath $backendSmokeOut -Raw
+            } else { '' }
+            $smokeErr = if (Test-Path -LiteralPath $backendSmokeErr) {
+                Get-Content -LiteralPath $backendSmokeErr -Raw
+            } else { '' }
+            throw "Frozen backend health smoke failed. stdout: $smokeOut stderr: $smokeErr"
+        }
+        $voicesPayload = $voicesResponse.Content | ConvertFrom-Json
+        if ($voicesPayload.status -ne 'ok' -or @($voicesPayload.voices).Count -eq 0) {
+            throw "Frozen backend returned an invalid voices response: $($voicesResponse.Content)"
+        }
+    } finally {
+        if ($null -ne $backendSmokeProcess -and -not $backendSmokeProcess.HasExited) {
+            Stop-Process -Id $backendSmokeProcess.Id -Force -ErrorAction SilentlyContinue
+            $backendSmokeProcess.WaitForExit()
+        }
+        if ($null -eq $previousApiUrl) {
+            Remove-Item Env:ORPHEUS_API_URL -ErrorAction SilentlyContinue
+        } else {
+            $env:ORPHEUS_API_URL = $previousApiUrl
+        }
+        if ($null -eq $previousPythonUtf8) {
+            Remove-Item Env:PYTHONUTF8 -ErrorAction SilentlyContinue
+        } else {
+            $env:PYTHONUTF8 = $previousPythonUtf8
+        }
     }
 
     Write-Step 'Creating payload manifest'
@@ -619,15 +816,24 @@ print(json.dumps({
 
     Write-Step 'Writing staging folder and ZIP'
     if ($Force) {
-        if (Test-Path -LiteralPath $stagingPath) { Remove-Item -LiteralPath $stagingPath -Recurse -Force }
+        if (-not $ReleaseAssetsOnly -and (Test-Path -LiteralPath $stagingPath)) {
+            Remove-Item -LiteralPath $stagingPath -Recurse -Force
+        }
         if (Test-Path -LiteralPath $archivePath) { Remove-Item -LiteralPath $archivePath -Force }
         if (Test-Path -LiteralPath $archiveManifestPath) {
             Remove-Item -LiteralPath $archiveManifestPath -Force
         }
+        if (Test-Path -LiteralPath $OutputRoot -PathType Container) {
+            Get-ChildItem -LiteralPath $OutputRoot -Force -File |
+                Where-Object { $_.Name -match $archivePartNamePattern } |
+                Remove-Item -Force
+        }
     }
-    New-Item -ItemType Directory -Force -Path $stagingPath | Out-Null
-    Get-ChildItem -LiteralPath $packRoot -Force | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination $stagingPath -Recurse -Force
+    if (-not $ReleaseAssetsOnly) {
+        New-Item -ItemType Directory -Force -Path $stagingPath | Out-Null
+        Get-ChildItem -LiteralPath $packRoot -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $stagingPath -Recurse -Force
+        }
     }
 
     # Compress-Archive on Windows PowerShell 5.1 silently omits Hidden files.
@@ -661,6 +867,34 @@ print(json.dumps({
     }
     $archiveFile = Get-Item -LiteralPath $archivePath
     $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($ReleaseAssetsOnly) {
+        Remove-OwnedWorkPath -Path $archiveRoot -WorkRoot $workRoot
+    }
+
+    # GitHub release assets must be smaller than 2 GiB. Keep a useful margin
+    # for platform behavior while making every chunk large enough to avoid an
+    # excessive number of requests for the multi-gigabyte CUDA runtime.
+    [long] $maximumReleasePartBytes = 1900L * 1024L * 1024L
+    $archiveMetadata = [pscustomobject][ordered]@{
+        fileName = $archiveFile.Name
+        byteSize = [long] $archiveFile.Length
+        sha256 = $archiveHash
+    }
+    $archiveWasSplit = $archiveFile.Length -gt $maximumReleasePartBytes
+    if ($archiveWasSplit) {
+        Write-Step 'Splitting oversized ZIP into GitHub release assets'
+        $archiveParts = @(Split-ArchiveForRelease `
+            -SourcePath $archivePath `
+            -DestinationDirectory $OutputRoot `
+            -PartBaseName $archiveFile.Name `
+            -MaximumPartBytes $maximumReleasePartBytes)
+        $archiveMetadata | Add-Member -NotePropertyName parts -NotePropertyValue $archiveParts
+
+        # The full name/hash/size remain in the sidecar so the downloader can
+        # verify the reconstructed ZIP. Removing the oversized source avoids
+        # accidentally selecting an asset that GitHub will reject on upload.
+        Remove-Item -LiteralPath $archivePath -Force
+    }
 
     $releaseManifest = [pscustomobject][ordered]@{
         schemaVersion = 1
@@ -677,21 +911,31 @@ print(json.dumps({
         backendArgs = $manifest.backendArgs
         executables = $manifest.executables
         payload = $manifest.payload
-        archive = [pscustomobject][ordered]@{
-            fileName = $archiveFile.Name
-            byteSize = [long] $archiveFile.Length
-            sha256 = $archiveHash
-        }
+        archive = $archiveMetadata
     }
     $releaseManifestJson = $releaseManifest | ConvertTo-Json -Depth 8
     Write-Utf8NoBom -Path $archiveManifestPath -Content $releaseManifestJson
     # The app's compiled release feed points at this stable alias. Updating it
-    # only after the versioned ZIP + sidecar are complete keeps "latest"
+    # only after the versioned archive assets + sidecar are complete keeps "latest"
     # recoverable and prevents readers from seeing a partially-written file.
     Write-Utf8NoBomAtomic -Path $stableManifestPath -Content $releaseManifestJson
 
-    Write-Host "    Staging: $stagingPath" -ForegroundColor Green
-    Write-Host "    Archive: $archivePath" -ForegroundColor Green
+    if ($ReleaseAssetsOnly) {
+        Write-Host '    Staging: omitted (release assets only)' -ForegroundColor Green
+    } else {
+        Write-Host "    Staging: $stagingPath" -ForegroundColor Green
+    }
+    if ($archiveWasSplit) {
+        Write-Host "    Archive: $($archiveFile.Name) (reconstruct from the listed parts)" `
+            -ForegroundColor Green
+        foreach ($part in $archiveParts) {
+            Write-Host "    Part:    $(Join-Path $OutputRoot $part.fileName)" -ForegroundColor Green
+        }
+        Write-Host '    Upload every Part above; the oversized whole ZIP was removed.' `
+            -ForegroundColor Yellow
+    } else {
+        Write-Host "    Archive: $archivePath" -ForegroundColor Green
+    }
     Write-Host "    Feed:    $stableManifestPath" -ForegroundColor Green
     Write-Host "    SHA-256: $archiveHash" -ForegroundColor Green
 } finally {

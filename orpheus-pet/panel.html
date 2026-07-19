@@ -18,10 +18,11 @@
         <button id="hide" class="hide-btn" title="Hide to tray">–</button>
       </div>
 
-      <!-- Language + voice pickers (always visible). -->
-      <div id="pickerRows" class="panel-row">
+      <!-- The model target is one choice: language + size stay together and
+           remain editable on first run until setup actually starts. -->
+      <div id="pickerRows" class="panel-row model-row">
         <select id="lang" title="Language" aria-label="Language"></select>
-        <select id="voice" title="Voice" aria-label="Voice"></select>
+        <select id="quality" aria-label="Model size" title="Model size · VRAM shown is for full-GPU (optimal) performance — smaller runs on lower-end GPUs"></select>
       </div>
 
       <!-- Middle zone: normally the text box + Speak. The download confirm and
@@ -53,13 +54,13 @@
       <div class="panel-row dl-row" id="dlRow" style="display: none">
         <div class="dl-info">
           <span id="dlLabel">Downloading…</span>
-          <div class="dl-bar"><div id="dlFill"></div></div>
+          <div id="dlBar" class="dl-bar" role="progressbar" aria-label="Speech setup progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="dlFill"></div></div>
         </div>
         <button id="stopDl" class="btn">Stop</button>
       </div>
 
       <div class="panel-row hotkey-row">
-        <select id="quality" aria-label="Model size" title="Model size · VRAM shown is for full-GPU (optimal) performance — smaller runs on lower-end GPUs"></select>
+        <select id="voice" title="Voice" aria-label="Voice"></select>
         <button id="hotkey" class="btn hk-btn" title="Read-aloud hotkey — click, then press a shortcut">…</button>
       </div>
     </section>

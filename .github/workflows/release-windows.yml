@@ -1,0 +1,892 @@
+name: Release Windows installer
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag (for example v0.1.0)"
+        required: true
+        type: string
+
+# A published release immediately becomes the app's runtime feed. Serialize all
+# Windows releases so two tags cannot race to become /releases/latest.
+concurrency:
+  group: release-windows
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  contents: read
+
+env:
+  # Both CUDA inputs must support Blackwell. The app only selects this feed for
+  # NVIDIA drivers new enough for CUDA 13; older drivers use the CPU feed.
+  LLAMA_CPP_TAG: b10068
+  LLAMA_CPU_SHA256: 01d5f30876acfb4a0be59396710f450213495c7181d8fbcce2fad045835ceb89
+  LLAMA_CUDA_SHA256: 1c0dee9eeb864690289c40458254fd34ab9978873c81d890c129a9a0b1883891
+  LLAMA_CUDART_SHA256: 1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e
+  TORCH_VERSION: 2.11.0
+  MAX_RELEASE_ASSET_BYTES: "2147483647"
+
+jobs:
+  metadata:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      commit: ${{ steps.release.outputs.commit }}
+      already_published: ${{ steps.release.outputs.already_published }}
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require one existing stable version tag
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_TAG -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+            throw "Release tag must be stable semver in the form vMAJOR.MINOR.PATCH: $env:RELEASE_TAG"
+          }
+          $version = $Matches.version
+
+          git show-ref --verify --quiet "refs/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw "Tag does not exist: $env:RELEASE_TAG" }
+          $tagCommit = (git rev-list -n 1 $env:RELEASE_TAG).Trim()
+          $headCommit = (git rev-parse HEAD).Trim()
+          if ($tagCommit -ne $headCommit) {
+            throw "Checkout $headCommit does not match tag $env:RELEASE_TAG ($tagCommit)"
+          }
+
+          $tauri = Get-Content 'orpheus-pet/src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
+          $package = Get-Content 'orpheus-pet/package.json' -Raw | ConvertFrom-Json
+          $cargo = Get-Content 'orpheus-pet/src-tauri/Cargo.toml' -Raw
+          if ($cargo -notmatch '(?ms)^\[package\]\s*.*?^version\s*=\s*"(?<cargoVersion>[^"]+)"') {
+            throw 'Could not read the Rust package version'
+          }
+          $versions = [ordered]@{
+            tag = $version
+            tauri = [string] $tauri.version
+            package = [string] $package.version
+            cargo = [string] $Matches.cargoVersion
+          }
+          $mismatches = @($versions.GetEnumerator() | Where-Object { $_.Value -ne $version })
+          if ($mismatches.Count -ne 0) {
+            throw "Release versions disagree: $($versions | ConvertTo-Json -Compress)"
+          }
+
+          $headers = @{
+            Accept = 'application/vnd.github+json'
+            Authorization = "Bearer $env:GH_TOKEN"
+            'User-Agent' = 'orpheus-pet-release'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $apiRoot = "https://api.github.com/repos/$env:GITHUB_REPOSITORY"
+          $remoteCommit = Invoke-RestMethod `
+            -Headers $headers `
+            -Uri "$apiRoot/commits/$env:RELEASE_TAG"
+          if ([string] $remoteCommit.sha -cne $headCommit) {
+            throw "Remote tag moved after checkout: expected $headCommit, found $($remoteCommit.sha)"
+          }
+
+          $release = $null
+          try {
+            $release = Invoke-RestMethod `
+              -Headers $headers `
+              -Uri "$apiRoot/releases/tags/$env:RELEASE_TAG"
+          } catch {
+            if ($_.Exception.Response.StatusCode.value__ -ne 404) { throw }
+          }
+          $alreadyPublished = $false
+          if ($null -ne $release) {
+            if ($release.draft -eq $true) {
+              $alreadyPublished = $false
+            } elseif ($release.prerelease -eq $true) {
+              throw "Tag already has a published prerelease: $env:RELEASE_TAG"
+            } else {
+              $latest = Invoke-RestMethod -Headers $headers -Uri "$apiRoot/releases/latest"
+              if ([string] $latest.tag_name -cne $env:RELEASE_TAG) {
+                throw "Published tag is not Latest: $env:RELEASE_TAG"
+              }
+              $alreadyPublished = $true
+              Write-Host "Release $env:RELEASE_TAG is already published, stable, and Latest; build jobs will be skipped"
+            }
+          }
+
+          "tag=$env:RELEASE_TAG" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "commit=$headCommit" >> $env:GITHUB_OUTPUT
+          "already_published=$($alreadyPublished.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+  runtime:
+    name: Build ${{ matrix.flavor }} runtime
+    needs: metadata
+    if: needs.metadata.outputs.already_published != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [cpu, cuda]
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.metadata.outputs.commit }}
+          persist-credentials: false
+
+      - name: Require enough runtime packaging disk
+        shell: pwsh
+        env:
+          RUNTIME_FLAVOR: ${{ matrix.flavor }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = [IO.Path]::GetPathRoot($env:RUNNER_TEMP)
+          $driveName = $root.TrimEnd('\').TrimEnd(':')
+          $drive = Get-PSDrive -Name $driveName
+          [long] $minimum = if ($env:RUNTIME_FLAVOR -eq 'cuda') {
+            10L * 1024L * 1024L * 1024L
+          } else {
+            6L * 1024L * 1024L * 1024L
+          }
+          if ([long] $drive.Free -lt $minimum) {
+            throw "Runtime $env:RUNTIME_FLAVOR packaging needs at least $([Math]::Round($minimum / 1GB)) GiB free on $root; found $([Math]::Round($drive.Free / 1GB, 1)) GiB"
+          }
+          Write-Host "Runtime output drive $root has $([Math]::Round($drive.Free / 1GB, 1)) GiB free"
+
+      - name: Set up Python 3.11 x64
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+          architecture: x64
+
+      - name: Install pinned backend build dependencies
+        shell: pwsh
+        env:
+          RUNTIME_FLAVOR: ${{ matrix.flavor }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --upgrade --no-cache-dir pip
+          if ($env:RUNTIME_FLAVOR -eq 'cuda') {
+            $torchIndex = 'https://download.pytorch.org/whl/cu128'
+          } else {
+            $torchIndex = 'https://download.pytorch.org/whl/cpu'
+          }
+          python -m pip install --no-cache-dir "torch==$env:TORCH_VERSION" --index-url $torchIndex
+          python -m pip install --no-cache-dir `
+            -r 'Orpheus-FastAPI/requirements.txt' `
+            -r 'scripts/runtime-pack.requirements.txt'
+          python -c "import PyInstaller, snac, torch; print({'torch': torch.__version__, 'cuda': torch.version.cuda, 'pyinstaller': PyInstaller.__version__})"
+
+      - name: Download and verify pinned llama.cpp runtime
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNTIME_FLAVOR: ${{ matrix.flavor }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = gh api "repos/ggml-org/llama.cpp/releases/tags/$env:LLAMA_CPP_TAG" |
+            ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Could not load llama.cpp release $env:LLAMA_CPP_TAG" }
+
+          $assetNames = if ($env:RUNTIME_FLAVOR -eq 'cuda') {
+            @(
+              "llama-$env:LLAMA_CPP_TAG-bin-win-cuda-13.3-x64.zip",
+              'cudart-llama-bin-win-cuda-13.3-x64.zip'
+            )
+          } else {
+            @("llama-$env:LLAMA_CPP_TAG-bin-win-cpu-x64.zip")
+          }
+          $reviewedHashes = @{
+            "llama-$env:LLAMA_CPP_TAG-bin-win-cpu-x64.zip" = $env:LLAMA_CPU_SHA256
+            "llama-$env:LLAMA_CPP_TAG-bin-win-cuda-13.3-x64.zip" = $env:LLAMA_CUDA_SHA256
+            'cudart-llama-bin-win-cuda-13.3-x64.zip' = $env:LLAMA_CUDART_SHA256
+          }
+          $downloads = Join-Path $env:RUNNER_TEMP "llama-download-$env:RUNTIME_FLAVOR"
+          $extract = Join-Path $env:RUNNER_TEMP "llama-extract-$env:RUNTIME_FLAVOR"
+          $runtime = Join-Path $env:RUNNER_TEMP "llama-runtime-$env:RUNTIME_FLAVOR"
+          New-Item -ItemType Directory -Force $downloads, $extract, $runtime | Out-Null
+
+          foreach ($name in $assetNames) {
+            $matches = @($release.assets | Where-Object { $_.name -ceq $name })
+            if ($matches.Count -ne 1) { throw "Expected exactly one upstream asset named $name" }
+            $asset = $matches[0]
+            if ([string] $asset.digest -notmatch '^sha256:(?<sha>[0-9a-f]{64})$') {
+              throw "Upstream asset has no GitHub SHA-256 digest: $name"
+            }
+            $githubHash = $Matches.sha
+            $expectedHash = [string] $reviewedHashes[$name]
+            if ($expectedHash -notmatch '^[0-9a-f]{64}$' -or
+                $githubHash -cne $expectedHash) {
+              throw "Upstream digest no longer matches the reviewed pin for $name"
+            }
+            $zipPath = Join-Path $downloads $name
+            Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $zipPath
+            $actualHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -cne $expectedHash) {
+              throw "llama.cpp asset digest mismatch for $name"
+            }
+            Expand-Archive -LiteralPath $zipPath -DestinationPath $extract -Force
+          }
+
+          $servers = @(Get-ChildItem -LiteralPath $extract -Recurse -File -Filter 'llama-server.exe')
+          if ($servers.Count -ne 1) {
+            throw "Expected one llama-server.exe in pinned archives, found $($servers.Count)"
+          }
+          Get-ChildItem -LiteralPath $servers[0].DirectoryName -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $runtime -Recurse -Force
+          }
+          Get-ChildItem -LiteralPath $extract -Recurse -File -Filter '*.dll' | ForEach-Object {
+            $target = Join-Path $runtime $_.Name
+            if (Test-Path -LiteralPath $target) {
+              $left = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+              $right = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+              if ($left -cne $right) { throw "Conflicting upstream DLL basename: $($_.Name)" }
+            } else {
+              Copy-Item -LiteralPath $_.FullName -Destination $target
+            }
+          }
+          Remove-Item -LiteralPath $downloads, $extract -Recurse -Force
+          "LLAMA_RUNTIME_DIR=$runtime" >> $env:GITHUB_ENV
+
+      - name: Build and verify runtime pack
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+          RUNTIME_FLAVOR: ${{ matrix.flavor }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = (Get-Command python).Source
+          $output = Join-Path $env:RUNNER_TEMP "runtime-output-$env:RUNTIME_FLAVOR"
+          & './scripts/build-runtime-pack.ps1' `
+            -Version $env:RELEASE_VERSION `
+            -Flavor $env:RUNTIME_FLAVOR `
+            -Architecture x64 `
+            -PythonPath $python `
+            -LlamaDirectory $env:LLAMA_RUNTIME_DIR `
+            -OutputRoot $output `
+            -ReleaseAssetsOnly
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime pack build failed' }
+          Remove-Item -LiteralPath $env:LLAMA_RUNTIME_DIR -Recurse -Force
+          "RUNTIME_OUTPUT_DIR=$output" >> $env:GITHUB_ENV
+
+      - name: Stage only sidecar-bound release assets
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+          RUNTIME_FLAVOR: ${{ matrix.flavor }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseDir = Join-Path $env:RUNNER_TEMP "runtime-release-$env:RUNTIME_FLAVOR"
+          New-Item -ItemType Directory -Force $releaseDir | Out-Null
+          $manifestName = "orpheus-runtime-windows-x64-$env:RUNTIME_FLAVOR.manifest.json"
+          $manifestPath = Join-Path $env:RUNTIME_OUTPUT_DIR $manifestName
+          if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw "Missing stable runtime manifest: $manifestPath"
+          }
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          if ($manifest.schemaVersion -ne 1 -or
+              $manifest.version -cne $env:RELEASE_VERSION -or
+              $manifest.platform -cne 'windows' -or
+              $manifest.architecture -cne 'x64' -or
+              $manifest.flavor -cne $env:RUNTIME_FLAVOR -or
+              $manifest.modelsIncluded -ne $false -or
+              $manifest.voiceModelsIncluded -ne $false) {
+            throw "Runtime sidecar contract does not match this release: $manifestPath"
+          }
+
+          $archive = $manifest.archive
+          $archiveName = [string] $archive.fileName
+          if ([IO.Path]::GetFileName($archiveName) -cne $archiveName -or -not $archiveName.EndsWith('.zip')) {
+            throw "Unsafe runtime archive filename: $archiveName"
+          }
+          $archivePath = Join-Path $env:RUNTIME_OUTPUT_DIR $archiveName
+          $parts = @($archive.parts)
+          if ($parts.Count -eq 0) {
+            if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
+              throw "Missing runtime archive: $archivePath"
+            }
+            $archiveFile = Get-Item -LiteralPath $archivePath
+            if ($archiveFile.Length -gt [long] $env:MAX_RELEASE_ASSET_BYTES) {
+              throw "Runtime archive exceeds GitHub's per-asset limit and has no archive.parts: $archiveName"
+            }
+            $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($archiveFile.Length -ne [long] $archive.byteSize -or
+                $archiveHash -cne [string] $archive.sha256) {
+              throw "Runtime archive does not match its sidecar: $archiveName"
+            }
+            Copy-Item -LiteralPath $archivePath -Destination $releaseDir
+          } else {
+            if (Test-Path -LiteralPath $archivePath) {
+              throw "A split runtime must not leave its oversized full ZIP available for upload: $archiveName"
+            }
+            [long] $partBytes = 0
+            $partNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            [void] $partNames.Add($archiveName)
+            $combinedHash = [Security.Cryptography.IncrementalHash]::CreateHash(
+              [Security.Cryptography.HashAlgorithmName]::SHA256
+            )
+            foreach ($part in $parts) {
+              $partName = [string] $part.fileName
+              if ([IO.Path]::GetFileName($partName) -cne $partName -or
+                  -not $partNames.Add($partName)) {
+                throw "Unsafe, duplicate, or case-colliding runtime part: $partName"
+              }
+              $partPath = Join-Path $env:RUNTIME_OUTPUT_DIR $partName
+              if (-not (Test-Path -LiteralPath $partPath -PathType Leaf)) {
+                throw "Missing sidecar-referenced runtime part: $partName"
+              }
+              $partFile = Get-Item -LiteralPath $partPath
+              if ($partFile.Length -gt [long] $env:MAX_RELEASE_ASSET_BYTES) {
+                throw "Runtime part exceeds GitHub's per-asset limit: $partName"
+              }
+              $partHash = (Get-FileHash -LiteralPath $partPath -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($partFile.Length -ne [long] $part.byteSize -or
+                  $partHash -cne [string] $part.sha256) {
+                throw "Runtime part does not match its sidecar: $partName"
+              }
+              $partBytes += $partFile.Length
+              $stream = [IO.File]::OpenRead($partPath)
+              $buffer = New-Object byte[] (8 * 1024 * 1024)
+              try {
+                while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                  $combinedHash.AppendData($buffer, 0, $read)
+                }
+              } finally {
+                $stream.Dispose()
+              }
+              Copy-Item -LiteralPath $partPath -Destination $releaseDir
+            }
+            if ($partBytes -ne [long] $archive.byteSize) {
+              throw "Runtime part sizes do not reconstruct $archiveName"
+            }
+            $reconstructedHash = [Convert]::ToHexString($combinedHash.GetHashAndReset()).ToLowerInvariant()
+            $combinedHash.Dispose()
+            if ($reconstructedHash -cne [string] $archive.sha256) {
+              throw "Runtime parts do not reconstruct the sidecar-bound ZIP: $archiveName"
+            }
+            # The complete ZIP is deliberately not staged: GitHub rejects files
+            # at or above 2 GiB and the app reconstructs it from these parts.
+          }
+          Copy-Item -LiteralPath $manifestPath -Destination $releaseDir
+          Get-ChildItem -LiteralPath $releaseDir -File |
+            Sort-Object Name |
+            Select-Object Name, Length |
+            Format-Table -AutoSize
+
+      - name: Upload ${{ matrix.flavor }} release inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-runtime-${{ matrix.flavor }}-${{ needs.metadata.outputs.version }}
+          path: ${{ runner.temp }}/runtime-release-${{ matrix.flavor }}/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+
+  app:
+    name: Build NSIS installer
+    needs: metadata
+    if: needs.metadata.outputs.already_published != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.metadata.outputs.commit }}
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+
+      - name: Install pinned frontend dependencies
+        shell: pwsh
+        working-directory: orpheus-pet
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm install --global pnpm@10.12.4
+          pnpm install --frozen-lockfile
+
+      - name: Build only the NSIS bundle
+        shell: pwsh
+        working-directory: orpheus-pet
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          pnpm tauri build --bundles nsis
+
+      - name: Validate and give the installer one stable name
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundleDir = 'orpheus-pet/src-tauri/target/release/bundle/nsis'
+          $installers = @(Get-ChildItem -LiteralPath $bundleDir -File -Filter '*-setup.exe')
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one NSIS setup executable, found $($installers.Count)"
+          }
+          if ($installers[0].Length -le 0 -or
+              $installers[0].Length -gt [long] $env:MAX_RELEASE_ASSET_BYTES) {
+            throw "Installer size is invalid: $($installers[0].Length) bytes"
+          }
+          $header = [IO.File]::ReadAllBytes($installers[0].FullName)[0..1]
+          if ($header[0] -ne 0x4d -or $header[1] -ne 0x5a) {
+            throw 'NSIS output is not a Windows PE executable'
+          }
+          $signature = Get-AuthenticodeSignature -LiteralPath $installers[0].FullName
+          if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+            Write-Output '::warning title=Unsigned Windows installer::Windows SmartScreen may show an Unknown publisher warning. Code signing still requires a trusted certificate and release secret.'
+            @(
+              '### Windows signing caveat',
+              '',
+              'The generated NSIS installer is not Authenticode-signed. Windows SmartScreen may show an **Unknown publisher** warning until release signing credentials are configured.'
+            ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+          $releaseDir = Join-Path $env:RUNNER_TEMP 'app-release'
+          New-Item -ItemType Directory -Force $releaseDir | Out-Null
+          Copy-Item -LiteralPath $installers[0].FullName `
+            -Destination (Join-Path $releaseDir 'Orpheus-Pet-Setup.exe')
+
+      - name: Upload installer release input
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-app-${{ needs.metadata.outputs.version }}
+          path: ${{ runner.temp }}/app-release/Orpheus-Pet-Setup.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+
+  publish:
+    name: Publish complete Windows release
+    needs: [metadata, runtime, app]
+    if: >-
+      always() &&
+      needs.metadata.result == 'success' &&
+      (needs.metadata.outputs.already_published == 'true' ||
+       (needs.runtime.result == 'success' && needs.app.result == 'success'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - name: Download all validated release inputs
+        if: needs.metadata.outputs.already_published != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: windows-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Validate the complete local asset set
+        if: needs.metadata.outputs.already_published != 'true'
+        shell: python
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("release-assets")
+          maximum = int(os.environ["MAX_RELEASE_ASSET_BYTES"])
+          expected = {"Orpheus-Pet-Setup.exe"}
+          seen_lower = set()
+
+          def digest(path):
+              value = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                      value.update(block)
+              return value.hexdigest()
+
+          for flavor in ("cpu", "cuda"):
+              manifest_name = f"orpheus-runtime-windows-x64-{flavor}.manifest.json"
+              manifest_path = root / manifest_name
+              manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+              assert manifest["schemaVersion"] == 1
+              assert manifest["version"] == os.environ["RELEASE_VERSION"]
+              assert manifest["platform"] == "windows"
+              assert manifest["architecture"] == "x64"
+              assert manifest["flavor"] == flavor
+              assert manifest["modelsIncluded"] is False
+              assert manifest["voiceModelsIncluded"] is False
+              expected.add(manifest_name)
+
+              archive = manifest["archive"]
+              archive_name = archive["fileName"]
+              assert Path(archive_name).name == archive_name and archive_name.endswith(".zip")
+              parts = archive.get("parts") or []
+              archive_digest = hashlib.sha256()
+              archive_bytes = 0
+              records = parts or [archive]
+              for record in records:
+                  name = record["fileName"]
+                  assert Path(name).name == name
+                  assert name.casefold() not in seen_lower
+                  seen_lower.add(name.casefold())
+                  path = root / name
+                  assert path.is_file(), f"missing sidecar-bound asset: {name}"
+                  size = path.stat().st_size
+                  assert 0 < size <= maximum, f"oversized release asset: {name}"
+                  assert size == record["byteSize"], f"size mismatch: {name}"
+                  assert digest(path) == record["sha256"], f"digest mismatch: {name}"
+                  expected.add(name)
+                  with path.open("rb") as stream:
+                      for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                          archive_digest.update(block)
+                          archive_bytes += len(block)
+              assert archive_bytes == archive["byteSize"], f"archive size mismatch: {archive_name}"
+              assert archive_digest.hexdigest() == archive["sha256"], f"archive hash mismatch: {archive_name}"
+              if parts:
+                  assert not (root / archive_name).exists(), "oversized full ZIP must not be published with parts"
+
+          installer = root / "Orpheus-Pet-Setup.exe"
+          assert installer.read_bytes()[:2] == b"MZ"
+          assert 0 < installer.stat().st_size <= maximum
+          actual = {path.name for path in root.iterdir() if path.is_file()}
+          assert actual == expected, f"unexpected release assets: {sorted(actual ^ expected)}"
+          assert len({name.casefold() for name in actual}) == len(actual)
+          for name in sorted(actual):
+              path = root / name
+              print(f"{digest(path)}  {path.stat().st_size:>12}  {name}")
+
+      - name: Require a monotonically newer stable release
+        id: release_order
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.metadata.outputs.commit }}
+        run: |
+          import hashlib
+          import json
+          import os
+          import re
+          from pathlib import Path
+          from urllib.error import HTTPError
+          from urllib.parse import quote
+          from urllib.request import Request, urlopen
+
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+              "User-Agent": "orpheus-pet-release",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+          repository = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["RELEASE_TAG"]
+          match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
+          assert match
+          candidate = tuple(map(int, match.groups()))
+
+          commit_request = Request(
+              f"https://api.github.com/repos/{repository}/commits/{quote(tag, safe='')}",
+              headers=headers,
+          )
+          with urlopen(commit_request) as response:
+              remote_commit = json.load(response)["sha"]
+          if remote_commit.lower() != os.environ["RELEASE_COMMIT"].lower():
+              raise SystemExit(
+                  f"Release tag moved after validation: expected {os.environ['RELEASE_COMMIT']}, "
+                  f"found {remote_commit}"
+              )
+
+          request = Request(
+              f"https://api.github.com/repos/{repository}/releases/latest",
+              headers=headers,
+          )
+          try:
+              with urlopen(request) as response:
+                  latest = json.load(response)
+          except HTTPError as error:
+              if error.code == 404:
+                  print("No published stable release exists yet")
+                  Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8").write(
+                      "already_published=false\n"
+                  )
+                  raise SystemExit(0)
+              raise
+          latest_tag = latest.get("tag_name", "")
+          latest_match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", latest_tag)
+          if not latest_match:
+              raise SystemExit(f"Latest published release has an unsupported tag: {latest_tag!r}")
+          latest_version = tuple(map(int, latest_match.groups()))
+          if candidate < latest_version:
+              raise SystemExit(
+                  f"Refusing to replace Latest {latest_tag} with older {tag}"
+              )
+          if candidate == latest_version:
+              if latest_tag != tag or latest.get("draft") is not False or latest.get("prerelease") is not False:
+                  raise SystemExit(f"Latest release metadata is inconsistent for {tag}")
+
+              remote = {asset["name"]: asset for asset in latest.get("assets", [])}
+              if len(remote) != len(latest.get("assets", [])):
+                  raise SystemExit("Published release contains duplicate asset names")
+
+              def asset_digest(asset):
+                  value = asset.get("digest", "")
+                  if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+                      raise SystemExit(f"Published asset has no GitHub SHA-256: {asset.get('name')}")
+                  return value.removeprefix("sha256:")
+
+              def require_asset(name, size=None, sha256=None):
+                  asset = remote.get(name)
+                  if asset is None or asset.get("state") != "uploaded":
+                      raise SystemExit(f"Published release is missing an uploaded asset: {name}")
+                  if not 0 < asset.get("size", 0) <= int(os.environ["MAX_RELEASE_ASSET_BYTES"]):
+                      raise SystemExit(f"Published asset size is invalid: {name}")
+                  if size is not None and asset["size"] != size:
+                      raise SystemExit(f"Published asset size differs from its sidecar: {name}")
+                  actual_digest = asset_digest(asset)
+                  if sha256 is not None and actual_digest != sha256:
+                      raise SystemExit(f"Published asset digest differs from its sidecar: {name}")
+                  return asset
+
+              def download_small(asset):
+                  request = Request(
+                      asset["url"],
+                      headers={**headers, "Accept": "application/octet-stream"},
+                  )
+                  with urlopen(request) as response:
+                      data = response.read()
+                  if len(data) != asset["size"] or hashlib.sha256(data).hexdigest() != asset_digest(asset):
+                      raise SystemExit(f"Downloaded published asset failed verification: {asset['name']}")
+                  return data
+
+              expected = {"Orpheus-Pet-Setup.exe"}
+              installer = require_asset("Orpheus-Pet-Setup.exe")
+              if download_small(installer)[:2] != b"MZ":
+                  raise SystemExit("Published installer is not a Windows PE executable")
+
+              version = ".".join(match.groups())
+              for flavor in ("cpu", "cuda"):
+                  manifest_name = f"orpheus-runtime-windows-x64-{flavor}.manifest.json"
+                  expected.add(manifest_name)
+                  manifest_asset = require_asset(manifest_name)
+                  manifest = json.loads(download_small(manifest_asset).decode("utf-8"))
+                  if not (
+                      manifest.get("schemaVersion") == 1
+                      and manifest.get("version") == version
+                      and manifest.get("platform") == "windows"
+                      and manifest.get("architecture") == "x64"
+                      and manifest.get("flavor") == flavor
+                      and manifest.get("modelsIncluded") is False
+                      and manifest.get("voiceModelsIncluded") is False
+                  ):
+                      raise SystemExit(f"Published runtime sidecar is invalid: {manifest_name}")
+
+                  archive = manifest.get("archive", {})
+                  archive_name = f"orpheus-runtime-{version}-windows-x64-{flavor}.zip"
+                  if (
+                      archive.get("fileName") != archive_name
+                      or not isinstance(archive.get("byteSize"), int)
+                      or archive["byteSize"] <= 0
+                      or not re.fullmatch(r"[0-9a-f]{64}", archive.get("sha256", ""))
+                  ):
+                      raise SystemExit(f"Published archive metadata is invalid: {manifest_name}")
+                  parts = archive.get("parts") or []
+                  if len(parts) > 256:
+                      raise SystemExit(f"Published runtime has too many archive parts: {manifest_name}")
+                  if not parts:
+                      expected.add(archive_name)
+                      require_asset(archive_name, archive["byteSize"], archive["sha256"])
+                      continue
+
+                  if archive_name in remote:
+                      raise SystemExit(f"Split runtime also publishes its oversized full ZIP: {archive_name}")
+                  part_bytes = 0
+                  for index, part in enumerate(parts, 1):
+                      part_name = f"{archive_name}.part{index:03d}"
+                      if (
+                          part.get("fileName") != part_name
+                          or not isinstance(part.get("byteSize"), int)
+                          or part["byteSize"] <= 0
+                          or not re.fullmatch(r"[0-9a-f]{64}", part.get("sha256", ""))
+                      ):
+                          raise SystemExit(f"Published archive part metadata is invalid: {part_name}")
+                      expected.add(part_name)
+                      require_asset(part_name, part["byteSize"], part["sha256"])
+                      part_bytes += part["byteSize"]
+                  if part_bytes != archive["byteSize"]:
+                      raise SystemExit(f"Published parts do not reconstruct the declared size: {archive_name}")
+
+              if set(remote) != expected or len({name.casefold() for name in remote}) != len(remote):
+                  raise SystemExit("Published release contains an unexpected or case-colliding asset set")
+              Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8").write(
+                  "already_published=true\n"
+              )
+              print(f"Release {tag} is already Latest with a sidecar-verified asset set")
+              raise SystemExit(0)
+
+          Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8").write(
+              "already_published=false\n"
+          )
+          print(f"Release order verified: {latest_tag} -> {tag}")
+
+      - name: Create or reset an unpublished draft
+        if: steps.release_order.outputs.already_published != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          if release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,tagName 2>/dev/null)"; then
+            jq -e --arg tag "$RELEASE_TAG" \
+              '.isDraft == true and .isPrerelease == false and .tagName == $tag' \
+              <<<"$release_json" >/dev/null || {
+                echo "Refusing to replace an existing published or prerelease release: $RELEASE_TAG" >&2
+                exit 1
+              }
+            release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq .id)"
+            while IFS= read -r asset_id; do
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+            done < <(gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" --jq '.[].id')
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --draft \
+              --title "Orpheus Pet $RELEASE_VERSION" \
+              --notes "Windows caveat: this installer is currently unsigned, so SmartScreen may show an Unknown publisher warning." \
+              --generate-notes
+          fi
+
+      - name: Upload every asset while the release is still draft
+        if: steps.release_order.outputs.already_published != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' assets < <(find release-assets -maxdepth 1 -type f -print0 | sort -z)
+          ((${#assets[@]} > 0))
+          gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY"
+
+      - name: Verify remote sizes and GitHub SHA-256 digests
+        if: steps.release_order.outputs.already_published != 'true'
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          raw = subprocess.check_output([
+              "gh", "api",
+              f"repos/{os.environ['GITHUB_REPOSITORY']}/releases/tags/{os.environ['RELEASE_TAG']}"
+          ])
+          release = json.loads(raw)
+          assert release["draft"] is True and release["prerelease"] is False
+          remote = {asset["name"]: asset for asset in release["assets"]}
+          local = {path.name: path for path in Path("release-assets").iterdir() if path.is_file()}
+          assert set(remote) == set(local), "remote release asset set differs from validated local set"
+          for name, path in local.items():
+              value = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                      value.update(block)
+              assert remote[name]["state"] == "uploaded"
+              assert remote[name]["size"] == path.stat().st_size
+              assert remote[name].get("digest") == f"sha256:{value.hexdigest()}", \
+                  f"GitHub digest mismatch or missing for {name}"
+
+      - name: Recheck the immutable tag before publication
+        if: steps.release_order.outputs.already_published != 'true'
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.metadata.outputs.commit }}
+        run: |
+          import json
+          import os
+          import re
+          from urllib.error import HTTPError
+          from urllib.parse import quote
+          from urllib.request import Request, urlopen
+
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+              "User-Agent": "orpheus-pet-release",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+          repository = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["RELEASE_TAG"]
+
+          def get(path):
+              request = Request(f"https://api.github.com/repos/{repository}/{path}", headers=headers)
+              with urlopen(request) as response:
+                  return json.load(response)
+
+          remote_commit = get(f"commits/{quote(tag, safe='')}")["sha"]
+          if remote_commit.lower() != os.environ["RELEASE_COMMIT"].lower():
+              raise SystemExit(
+                  f"Release tag moved after validation: expected {os.environ['RELEASE_COMMIT']}, "
+                  f"found {remote_commit}"
+              )
+
+          try:
+              latest_tag = get("releases/latest")["tag_name"]
+          except HTTPError as error:
+              if error.code == 404:
+                  latest_tag = None
+              else:
+                  raise
+          if latest_tag is not None:
+              candidate = tuple(map(int, re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag).groups()))
+              latest_match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", latest_tag)
+              if latest_match is None or candidate <= tuple(map(int, latest_match.groups())):
+                  raise SystemExit(f"Refusing to publish {tag} after Latest changed to {latest_tag}")
+
+      - name: Publish atomically and mark as Latest
+        if: steps.release_order.outputs.already_published != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release edit "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft=false \
+            --latest
+
+      - name: Confirm Latest after publication
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5 6; do
+            if latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)" &&
+                test "$latest" = "$RELEASE_TAG"; then
+              exit 0
+            fi
+            sleep "$((attempt * 2))"
+          done
+          echo "Latest did not resolve to $RELEASE_TAG after six attempts" >&2
+          exit 1

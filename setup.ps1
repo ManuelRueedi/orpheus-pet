@@ -19,18 +19,20 @@
     Don't download llama-server; you'll drop llama\llama-server.exe in yourself.
 
 .PARAMETER CudaVersion
-    PyTorch CUDA wheel channel (default: cu124). Ignored with -Cpu.
+    PyTorch CUDA wheel channel. By default setup uses cu128 with an R580+
+    NVIDIA driver (including RTX 50-series), and cu124 otherwise. Ignored with
+    -Cpu.
 
 .EXAMPLE
     .\setup.ps1
     .\setup.ps1 -Cpu
-    .\setup.ps1 -CudaVersion cu121
+    .\setup.ps1 -CudaVersion cu128
 #>
 [CmdletBinding()]
 param(
     [switch] $Cpu,
     [switch] $SkipLlama,
-    [string] $CudaVersion = 'cu124'
+    [string] $CudaVersion
 )
 
 $ErrorActionPreference = 'Stop'
@@ -54,6 +56,22 @@ function Write-Warn { param([string]$Msg) Write-Host "    WARNING: $Msg" -Foregr
 # Native exes don't throw on failure; check $LASTEXITCODE right after each call.
 function Assert-Native { param([string]$What)
     if ($LASTEXITCODE -ne 0) { throw "$What failed (exit $LASTEXITCODE)" }
+}
+
+function Test-Cuda13Driver {
+    try {
+        $versions = @(& nvidia-smi.exe `
+            --query-gpu=driver_version `
+            --format=csv,noheader,nounits 2>$null)
+        if ($LASTEXITCODE -ne 0) { return $false }
+        return @($versions | Where-Object {
+            $major = 0
+            [int]::TryParse(([string] $_).Trim().Split('.')[0], [ref] $major) -and
+                $major -ge 580
+        }).Count -gt 0
+    } catch {
+        return $false
+    }
 }
 
 # Best-effort: grab the latest llama.cpp Windows build and land llama-server.exe
@@ -82,10 +100,20 @@ function Get-LlamaServer {
         }
         $cudart = $null
     } else {
-        $main   = $assets | Where-Object { $_.name -match 'bin-win-cuda.*x64\.zip$' } | Select-Object -First 1
-        $cudart = $assets | Where-Object { $_.name -match '^cudart-.*x64\.zip$' }      | Select-Object -First 1
+        # CUDA 13 supports Blackwell but requires an R580+ driver. Keep older
+        # NVIDIA systems on the upstream CUDA 12.4 build.
+        $cudaAssetVersion = if (Test-Cuda13Driver) { '13(?:\.[0-9]+)*' } else { '12\.4' }
+        $main = $assets | Where-Object {
+            $_.name -match "bin-win-cuda-$cudaAssetVersion-x64\.zip$"
+        } | Select-Object -First 1
+        $cudart = $assets | Where-Object {
+            $_.name -match "^cudart-.*cuda-$cudaAssetVersion-x64\.zip$"
+        } | Select-Object -First 1
     }
     if (-not $main) { throw "no matching llama-server asset in release $($rel.tag_name)" }
+    if (-not $CpuBuild -and -not $cudart) {
+        throw "no matching CUDA runtime asset in release $($rel.tag_name)"
+    }
 
     $tmp  = Join-Path $env:TEMP ('llama-' + [System.IO.Path]::GetRandomFileName())
     $zips = Join-Path $tmp 'zips'
@@ -136,6 +164,10 @@ if ($missing.Count -gt 0) {
     throw 'Install the above, then re-run setup.ps1.'
 }
 Write-Ok 'node, pnpm, cargo, python found'
+
+if (-not $Cpu -and [string]::IsNullOrWhiteSpace($CudaVersion)) {
+    $CudaVersion = if (Test-Cuda13Driver) { 'cu128' } else { 'cu124' }
+}
 
 # ---- 1. Python backend ---------------------------------------------------
 Write-Step 'Python backend (Orpheus-FastAPI)'

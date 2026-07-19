@@ -36,9 +36,11 @@ const MANIFEST_SCHEMA: u32 = 1;
 const MAX_SIDECAR_BYTES: u64 = 1_048_576;
 const MAX_INTERNAL_MANIFEST_BYTES: u64 = 4 * 1_048_576;
 const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+const MAX_ARCHIVE_PARTS: usize = 256;
 const MAX_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_ZIP_ENTRIES: usize = 250_000;
 const MAX_PORTABLE_PATH_BYTES: usize = 1024;
+const CUDA_13_MIN_DRIVER_MAJOR: u32 = 580;
 const HASH_FORMAT: &str =
     "sha256-lowercase, two spaces, portable path, LF; StringComparer.Ordinal path order";
 
@@ -191,10 +193,20 @@ struct PackContract {
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ArchivePart {
+    file_name: String,
+    byte_size: u64,
+    sha256: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ArchiveRecord {
     file_name: String,
     byte_size: u64,
     sha256: String,
+    #[serde(default)]
+    parts: Vec<ArchivePart>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -223,6 +235,7 @@ struct InternalManifest {
 struct ValidatedSidecar {
     raw: SidecarManifest,
     archive_url: Url,
+    part_urls: Vec<Url>,
     source: &'static str,
 }
 
@@ -233,6 +246,7 @@ pub struct RuntimeInstallPlan {
     version: String,
     flavor: String,
     approximate_bytes: u64,
+    plan_id: String,
     source: String,
 }
 
@@ -280,12 +294,25 @@ fn unique_suffix() -> String {
     format!("{}-{nanos}", std::process::id())
 }
 
+fn nvidia_driver_supports_cuda_13(output: &str) -> bool {
+    output.lines().any(|line| {
+        line.trim()
+            .split('.')
+            .next()
+            .and_then(|major| major.parse::<u32>().ok())
+            .is_some_and(|major| major >= CUDA_13_MIN_DRIVER_MAJOR)
+    })
+}
+
 fn detect_nvidia_gpu() -> bool {
     let mut command = Command::new("nvidia-smi.exe");
     command
-        .arg("--list-gpus")
+        .args([
+            "--query-gpu=driver_version",
+            "--format=csv,noheader,nounits",
+        ])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null());
     hidden(&mut command);
     let Ok(mut child) = command.spawn() else {
@@ -294,7 +321,13 @@ fn detect_nvidia_gpu() -> bool {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(status)) => {
+                let mut output = String::new();
+                if let Some(mut stdout) = child.stdout.take() {
+                    let _ = stdout.read_to_string(&mut output);
+                }
+                return status.success() && nvidia_driver_supports_cuda_13(&output);
+            }
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
             _ => {
                 let _ = child.kill();
@@ -513,16 +546,65 @@ fn validate_sidecar(
     {
         return Err("runtime archive fileName must be a single .zip filename".to_string());
     }
-    let archive_url = manifest_url
-        .join(&sidecar.archive.file_name)
-        .map_err(|e| format!("could not resolve runtime archive URL: {e}"))?;
-    validate_https_url(&archive_url)?;
-    if archive_url.origin() != manifest_url.origin() {
-        return Err("runtime archive must use the same HTTPS origin as its manifest".to_string());
+    let resolve_asset = |file_name: &str, description: &str| -> Result<Url, String> {
+        let url = manifest_url
+            .join(file_name)
+            .map_err(|e| format!("could not resolve runtime {description} URL: {e}"))?;
+        validate_https_url(&url)?;
+        if url.origin() != manifest_url.origin() {
+            return Err(format!(
+                "runtime {description} must use the same HTTPS origin as its manifest"
+            ));
+        }
+        Ok(url)
+    };
+    let archive_url = resolve_asset(&sidecar.archive.file_name, "archive")?;
+
+    if sidecar.archive.parts.len() > MAX_ARCHIVE_PARTS {
+        return Err(format!(
+            "runtime archive has too many parts (maximum {MAX_ARCHIVE_PARTS})"
+        ));
+    }
+    let mut asset_names = HashSet::with_capacity(sidecar.archive.parts.len() + 1);
+    asset_names.insert(sidecar.archive.file_name.to_ascii_lowercase());
+    let mut part_bytes = 0_u64;
+    let mut part_urls = Vec::with_capacity(sidecar.archive.parts.len());
+    for (index, part) in sidecar.archive.parts.iter().enumerate() {
+        if part.byte_size == 0 || part.byte_size > MAX_ARCHIVE_BYTES {
+            return Err(format!(
+                "runtime archive part {} size is invalid",
+                index + 1
+            ));
+        }
+        validate_sha256(&part.sha256, "archive part SHA-256")?;
+        validate_portable_file_path(&part.file_name)?;
+        if Path::new(&part.file_name).components().count() != 1 {
+            return Err(format!(
+                "runtime archive part {} fileName must be a single filename",
+                index + 1
+            ));
+        }
+        if !asset_names.insert(part.file_name.to_ascii_lowercase()) {
+            return Err(format!(
+                "runtime archive contains a duplicate or case-colliding asset name: {}",
+                part.file_name
+            ));
+        }
+        part_bytes = part_bytes
+            .checked_add(part.byte_size)
+            .ok_or_else(|| "runtime archive part size overflow".to_string())?;
+        part_urls.push(resolve_asset(&part.file_name, "archive part")?);
+    }
+    if !sidecar.archive.parts.is_empty() && part_bytes != sidecar.archive.byte_size {
+        return Err(format!(
+            "runtime archive parts total {part_bytes} bytes, expected {}",
+            sidecar.archive.byte_size
+        ));
     }
     Ok(ValidatedSidecar {
         raw: sidecar,
         archive_url,
+        part_urls,
         source,
     })
 }
@@ -827,6 +909,151 @@ fn curl_download(
     }
     if size > maximum_bytes {
         return Err("runtime download exceeded its size limit".to_string());
+    }
+    Ok(())
+}
+
+fn append_file(
+    source: &Path,
+    destination: &mut File,
+    installer: &RuntimeInstaller,
+) -> Result<u64, String> {
+    let file = File::open(source).map_err(|e| {
+        format!(
+            "could not open runtime archive part {}: {e}",
+            source.display()
+        )
+    })?;
+    let mut reader = BufReader::new(file);
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut total = 0_u64;
+    loop {
+        installer.check_cancelled()?;
+        let read = reader.read(&mut buffer).map_err(|e| {
+            format!(
+                "could not read runtime archive part {}: {e}",
+                source.display()
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        destination
+            .write_all(&buffer[..read])
+            .map_err(|e| format!("could not assemble the runtime archive: {e}"))?;
+        total = total
+            .checked_add(read as u64)
+            .ok_or_else(|| "runtime archive assembly size overflow".to_string())?;
+    }
+    Ok(total)
+}
+
+fn archive_progress_pct(received: u64, total: u64) -> u8 {
+    let fraction = if total == 0 {
+        0.0
+    } else {
+        (received as f64 / total as f64).clamp(0.0, 1.0)
+    };
+    5_u8.saturating_add((fraction * 53.0).round() as u8)
+}
+
+fn download_runtime_archive(
+    app: &AppHandle,
+    installer: &RuntimeInstaller,
+    sidecar: &ValidatedSidecar,
+    work: &Path,
+    archive_path: &Path,
+) -> Result<(), String> {
+    if sidecar.raw.archive.parts.is_empty() {
+        return curl_download(
+            app,
+            installer,
+            &sidecar.archive_url,
+            archive_path,
+            sidecar.raw.archive.byte_size,
+            Some(sidecar.raw.archive.byte_size),
+            5,
+            53,
+            "Downloading the speech runtime",
+        );
+    }
+
+    let mut archive = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(archive_path)
+        .map_err(|e| format!("could not create the assembled runtime archive: {e}"))?;
+    let part_count = sidecar.raw.archive.parts.len();
+    let mut assembled_bytes = 0_u64;
+
+    for (index, (part, url)) in sidecar
+        .raw
+        .archive
+        .parts
+        .iter()
+        .zip(&sidecar.part_urls)
+        .enumerate()
+    {
+        installer.check_cancelled()?;
+        let part_path = work.join(format!("runtime-archive-part-{:03}.download", index + 1));
+        let start_pct = archive_progress_pct(assembled_bytes, sidecar.raw.archive.byte_size);
+        let end_bytes = assembled_bytes
+            .checked_add(part.byte_size)
+            .ok_or_else(|| "runtime archive part size overflow".to_string())?;
+        let end_pct = archive_progress_pct(end_bytes, sidecar.raw.archive.byte_size);
+        let message = format!(
+            "Downloading speech runtime part {}/{}",
+            index + 1,
+            part_count
+        );
+        curl_download(
+            app,
+            installer,
+            url,
+            &part_path,
+            part.byte_size,
+            Some(part.byte_size),
+            start_pct,
+            end_pct.saturating_sub(start_pct),
+            &message,
+        )?;
+
+        emit_progress(
+            app,
+            Progress {
+                phase: "verifying-part",
+                pct: end_pct,
+                received: Some(end_bytes),
+                total: Some(sidecar.raw.archive.byte_size),
+                message: "Verifying a runtime download part",
+            },
+        );
+        let (part_size, part_hash) = sha256_file(&part_path, installer)?;
+        if part_size != part.byte_size || part_hash != part.sha256 {
+            return Err(format!(
+                "runtime archive part {} failed size or SHA-256 verification",
+                index + 1
+            ));
+        }
+        let appended = append_file(&part_path, &mut archive, installer)?;
+        if appended != part.byte_size {
+            return Err(format!(
+                "runtime archive part {} changed while it was assembled",
+                index + 1
+            ));
+        }
+        assembled_bytes = end_bytes;
+        let _ = fs::remove_file(&part_path);
+    }
+    archive
+        .flush()
+        .map_err(|e| format!("could not flush the assembled runtime archive: {e}"))?;
+    drop(archive);
+    if assembled_bytes != sidecar.raw.archive.byte_size {
+        return Err(format!(
+            "assembled runtime archive size mismatch: expected {}, wrote {assembled_bytes}",
+            sidecar.raw.archive.byte_size
+        ));
     }
     Ok(())
 }
@@ -1585,36 +1812,47 @@ fn runtime_plan_blocking(
     );
     Ok(RuntimeInstallPlan {
         available: true,
-        version: sidecar.raw.contract.version,
-        flavor: sidecar.raw.contract.flavor,
+        version: sidecar.raw.contract.version.clone(),
+        flavor: sidecar.raw.contract.flavor.clone(),
         approximate_bytes: sidecar.raw.archive.byte_size,
+        plan_id: runtime_plan_id(&sidecar),
         source: sidecar.source.to_string(),
     })
+}
+
+// Consent is tied to the exact release contract shown by runtime_install_plan.
+// The stable GitHub alias can advance between the plan request and the click;
+// refuse that drift instead of silently downloading a different pack or size.
+fn runtime_plan_id(sidecar: &ValidatedSidecar) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        sidecar.raw.contract.version,
+        sidecar.raw.contract.flavor,
+        sidecar.raw.archive.byte_size,
+        sidecar.raw.archive.sha256
+    )
 }
 
 fn install_runtime_blocking(
     app: &AppHandle,
     installer: &RuntimeInstaller,
+    expected_plan_id: &str,
 ) -> Result<RuntimeInstallResult, String> {
     let _session = installer.begin()?;
     let root = runtime_root(app)?;
     let suffix = unique_suffix();
     let work = prepare_work_directory(&root, &suffix)?;
     let sidecar = fetch_sidecar(app, installer, &work.0)?;
+    if expected_plan_id != runtime_plan_id(&sidecar) {
+        return Err(
+            "the runtime release changed after it was shown; review the updated download and try again"
+                .to_string(),
+        );
+    }
     installer.check_cancelled()?;
 
     let archive_path = work.0.join("runtime.zip.part");
-    curl_download(
-        app,
-        installer,
-        &sidecar.archive_url,
-        &archive_path,
-        sidecar.raw.archive.byte_size,
-        Some(sidecar.raw.archive.byte_size),
-        5,
-        53,
-        "Downloading the speech runtime",
-    )?;
+    download_runtime_archive(app, installer, &sidecar, &work.0, &archive_path)?;
     emit_progress(
         app,
         Progress {
@@ -1822,7 +2060,10 @@ pub async fn runtime_install_plan(app: AppHandle) -> Result<RuntimeInstallPlan, 
 }
 
 #[tauri::command]
-pub async fn install_runtime(app: AppHandle) -> Result<RuntimeInstallResult, String> {
+pub async fn install_runtime(
+    app: AppHandle,
+    plan_id: String,
+) -> Result<RuntimeInstallResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         #[cfg(not(windows))]
         {
@@ -1831,7 +2072,7 @@ pub async fn install_runtime(app: AppHandle) -> Result<RuntimeInstallResult, Str
         #[cfg(windows)]
         {
             let installer = app.state::<RuntimeInstaller>();
-            let result = install_runtime_blocking(&app, installer.inner());
+            let result = install_runtime_blocking(&app, installer.inner(), &plan_id);
             if let Err(error) = &result {
                 emit_terminal_error(&app, error);
             }
@@ -1931,8 +2172,18 @@ mod tests {
                 file_name: "orpheus-runtime.zip".to_string(),
                 byte_size: 100,
                 sha256: "b".repeat(64),
+                parts: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn cuda_runtime_requires_an_r580_or_newer_nvidia_driver() {
+        assert!(!nvidia_driver_supports_cuda_13(""));
+        assert!(!nvidia_driver_supports_cuda_13("572.61\n"));
+        assert!(nvidia_driver_supports_cuda_13("580.00\n"));
+        assert!(nvidia_driver_supports_cuda_13("591.86\n"));
+        assert!(nvidia_driver_supports_cuda_13("572.61\n591.86\n"));
     }
 
     #[test]
@@ -1945,6 +2196,87 @@ mod tests {
             "https://downloads.example.test/releases/orpheus-runtime.zip"
         );
         assert_eq!(validated.raw.contract.version, "2026.07.18");
+        assert!(validated.part_urls.is_empty());
+    }
+
+    #[test]
+    fn runtime_plan_id_binds_the_displayed_release_contract() {
+        let manifest_url =
+            Url::parse("https://downloads.example.test/releases/runtime.manifest.json").unwrap();
+        let first = validate_sidecar(valid_sidecar(), &manifest_url, "test").unwrap();
+        let first_id = runtime_plan_id(&first);
+
+        let mut changed = valid_sidecar();
+        changed.archive.byte_size += 1;
+        changed.archive.sha256 = "d".repeat(64);
+        let second = validate_sidecar(changed, &manifest_url, "test").unwrap();
+
+        assert_ne!(first_id, runtime_plan_id(&second));
+        assert!(first_id.starts_with("2026.07.18:cuda:100:"));
+    }
+
+    #[test]
+    fn validates_multipart_archive_contract_and_ordered_urls() {
+        let manifest_url =
+            Url::parse("https://downloads.example.test/releases/runtime.manifest.json").unwrap();
+        let mut sidecar = valid_sidecar();
+        sidecar.archive.parts = vec![
+            ArchivePart {
+                file_name: "orpheus-runtime.zip.part001".to_string(),
+                byte_size: 40,
+                sha256: "c".repeat(64),
+            },
+            ArchivePart {
+                file_name: "orpheus-runtime.zip.part002".to_string(),
+                byte_size: 60,
+                sha256: "d".repeat(64),
+            },
+        ];
+
+        let validated = validate_sidecar(sidecar, &manifest_url, "test").unwrap();
+        assert_eq!(validated.part_urls.len(), 2);
+        assert_eq!(
+            validated.part_urls[0].as_str(),
+            "https://downloads.example.test/releases/orpheus-runtime.zip.part001"
+        );
+        assert_eq!(
+            validated.part_urls[1].as_str(),
+            "https://downloads.example.test/releases/orpheus-runtime.zip.part002"
+        );
+    }
+
+    #[test]
+    fn rejects_multipart_archive_size_and_name_mismatches() {
+        let manifest_url =
+            Url::parse("https://downloads.example.test/releases/runtime.manifest.json").unwrap();
+        let mut wrong_size = valid_sidecar();
+        wrong_size.archive.parts = vec![ArchivePart {
+            file_name: "orpheus-runtime.zip.part001".to_string(),
+            byte_size: 99,
+            sha256: "c".repeat(64),
+        }];
+        let error = validate_sidecar(wrong_size, &manifest_url, "test")
+            .err()
+            .unwrap();
+        assert!(error.contains("parts total"), "{error}");
+
+        let mut duplicate = valid_sidecar();
+        duplicate.archive.parts = vec![
+            ArchivePart {
+                file_name: "orpheus-runtime.zip.part001".to_string(),
+                byte_size: 40,
+                sha256: "c".repeat(64),
+            },
+            ArchivePart {
+                file_name: "ORPHEUS-RUNTIME.ZIP.PART001".to_string(),
+                byte_size: 60,
+                sha256: "d".repeat(64),
+            },
+        ];
+        let error = validate_sidecar(duplicate, &manifest_url, "test")
+            .err()
+            .unwrap();
+        assert!(error.contains("case-colliding"), "{error}");
     }
 
     #[test]
@@ -1994,6 +2326,29 @@ mod tests {
             sha256: format!("{:x}", hasher.finalize()),
         };
         verify_file_record(&file, &record, &RuntimeInstaller::default()).unwrap();
+    }
+
+    #[test]
+    fn assembles_archive_parts_in_manifest_order() {
+        let directory = TestDirectory::new();
+        let first = directory.0.join("first.part");
+        let second = directory.0.join("second.part");
+        let assembled = directory.0.join("runtime.zip");
+        fs::write(&first, b"ordered ").unwrap();
+        fs::write(&second, b"archive").unwrap();
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&assembled)
+            .unwrap();
+        let installer = RuntimeInstaller::default();
+
+        assert_eq!(append_file(&first, &mut output, &installer).unwrap(), 8);
+        assert_eq!(append_file(&second, &mut output, &installer).unwrap(), 7);
+        output.flush().unwrap();
+        drop(output);
+
+        assert_eq!(fs::read(assembled).unwrap(), b"ordered archive");
     }
 
     #[test]

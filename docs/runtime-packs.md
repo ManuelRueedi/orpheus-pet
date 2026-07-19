@@ -15,6 +15,29 @@ SNAC audio decoder, but never voice GGUF models or machine-local configuration.
 - **Contributors and release builders** use `setup.ps1` and the commands below.
   `setup.ps1` is a source-development bootstrap, not an end-user installer.
 
+## Publish a Windows release
+
+The release workflow is intentionally the normal publishing path. Keep the
+version identical in `orpheus-pet/package.json`, `orpheus-pet/src-tauri/Cargo.toml`,
+and `orpheus-pet/src-tauri/tauri.conf.json`, then push a stable tag such as
+`v0.1.0`. `.github/workflows/release-windows.yml` builds both runtime flavors and
+one NSIS installer from that exact tag, validates the complete sidecar-bound
+asset set, uploads it to an unpublished draft, verifies GitHub's remote sizes
+and SHA-256 digests, and only then publishes it as Latest. A manual dispatch can
+rebuild an existing unpublished tag; it will not replace an already-published
+release.
+
+The workflow pins its third-party actions, Torch build, CUDA line, and
+llama.cpp release. Update those pins as reviewed dependency changes, not as part
+of an unrelated app release. The generated installer is not code-signed until a
+Windows signing identity is configured; unsigned test releases can therefore
+trigger Microsoft Defender SmartScreen.
+
+CI passes `-ReleaseAssetsOnly` to the pack builder so the standard Windows
+runner does not retain duplicate unpacked trees. Omit that switch for local
+development builds when you also want the inspectable `runtime/<version>/<flavor>`
+staging directory.
+
 ## Build a pack
 
 Run on Windows. The source environment must already contain the intended
@@ -62,7 +85,9 @@ artifacts/runtime-packs/
 │     ├─ outputs/
 │     ├─ static/
 │     └─ templates/
-├─ orpheus-runtime-<version>-windows-<arch>-<flavor>.zip
+├─ orpheus-runtime-<version>-windows-<arch>-<flavor>.zip          small packs only
+├─ orpheus-runtime-<version>-windows-<arch>-<flavor>.zip.part001 oversized packs only
+├─ orpheus-runtime-<version>-windows-<arch>-<flavor>.zip.part002 (and so on)
 ├─ orpheus-runtime-<version>-windows-<arch>-<flavor>.manifest.json
 └─ orpheus-runtime-windows-<arch>-<flavor>.manifest.json  stable feed alias
 ```
@@ -70,37 +95,63 @@ artifacts/runtime-packs/
 The manifest inside the pack records every payload file, its byte size and
 SHA-256, plus a deterministic hash of the ordinally sorted file list. The
 sidecar manifest adds the ZIP byte size and SHA-256 so a downloader can reject a
-corrupt archive before extraction. Paths in both manifests use `/` and are
-relative to the version/flavor directory. Its top-level `llamaServer`, `backendExe`,
-`backendDir`, and `backendArgs` fields are the app launch contract.
+corrupt archive before extraction. When that ZIP is larger than 1,992,294,400
+bytes (1900 MiB), the builder splits it into deterministic byte ranges no larger
+than that limit. Their exact names are the full ZIP name followed by a
+three-digit ordinal: `.zip.part001`, `.zip.part002`, and so on. Both the
+versioned and stable sidecars then include `archive.parts` in concatenation
+order; every part records its own `fileName`, `byteSize`, and `sha256`.
+`archive.fileName`, `archive.byteSize`, and `archive.sha256` continue to describe
+the complete reconstructed ZIP. Packs at or below the limit omit `parts`, so
+their sidecar schema and single-ZIP download remain backward compatible.
+
+Paths in both manifests use `/` and are relative to the version/flavor
+directory. Its top-level `llamaServer`, `backendExe`, `backendDir`, and
+`backendArgs` fields are the app launch contract.
 
 The build updates the unversioned sidecar alias atomically only after the
-versioned ZIP and manifest are complete. Release publishing must upload that
-alias together with its referenced versioned ZIP. On x64 PCs the app selects
-the CUDA alias when `nvidia-smi` succeeds and the CPU alias otherwise;
+versioned archive assets and manifest are complete. Release publishing must
+upload that alias together with either its referenced versioned ZIP or every
+entry in `archive.parts`. On x64 PCs the app selects the CUDA alias when
+`nvidia-smi` finds an R580-or-newer driver (the CUDA 13 runtime baseline) and
+the CPU alias otherwise;
 `ORPHEUS_PET_RUNTIME_FLAVOR=cpu|cuda` is an explicit override. A custom trusted
 sidecar can be supplied at process level with
 `ORPHEUS_PET_RUNTIME_MANIFEST_URL` (and is required to exercise the downloader
 from a debug build).
 
-For each app release, build both desired flavors and upload these assets to the
-same GitHub release:
+For each app release, build both desired flavors. For a pack at or below 1900
+MiB, upload the single ZIP. For a larger pack, the builder removes the oversized
+whole ZIP after hashing and splitting it; upload **every** `.partNNN` named in
+the stable manifest, in addition to the stable manifest itself. Do not recreate
+or upload the oversized ZIP: GitHub requires every individual release asset to
+be smaller than 2 GiB, and the app reconstructs and verifies it locally.
+
+A release may therefore contain a mix of single and multipart flavors:
 
 ```text
-orpheus-runtime-<version>-windows-x64-cpu.zip
-orpheus-runtime-<version>-windows-x64-cuda.zip
+orpheus-runtime-<version>-windows-x64-cpu.zip              single-pack example
+orpheus-runtime-<version>-windows-x64-cuda.zip.part001     multipart example
+orpheus-runtime-<version>-windows-x64-cuda.zip.part002
+... one asset for every cuda archive.parts entry
 orpheus-runtime-windows-x64-cpu.manifest.json
 orpheus-runtime-windows-x64-cuda.manifest.json
 Orpheus-Pet-Setup.exe
 ```
 
-The stable manifests name their exact versioned ZIP, size, and SHA-256. The app
-requires that ZIP to resolve from the same HTTPS origin, downloads it with a
-strict size ceiling, rejects unsafe ZIP paths/links/collisions, verifies every
-payload hash, and only then swaps `runtime/current`. A previous active runtime
-is retained until both expected HTTP endpoints become ready, and is restored if
-startup fails. The rollback directory is also a durable transaction marker: a
-launch interrupted by a crash or power loss is recovered before services start.
+The stable manifests name their exact versioned ZIP, size, and SHA-256 and, for
+multipart packs, every ordered part with its own size and SHA-256. The app
+requires the ZIP or all parts to resolve from the same HTTPS origin, downloads
+each asset with a strict size ceiling, verifies parts before concatenating them,
+then verifies the reconstructed ZIP. It rejects unsafe ZIP
+paths/links/collisions, verifies every payload hash, and only then swaps
+`runtime/current`. A previous active runtime is retained until both expected
+HTTP endpoints become ready, and is restored if startup fails. The rollback
+directory is also a durable transaction marker: a launch interrupted by a crash
+or power loss is recovered before services start.
+The first-run consent screen is bound to that manifest's version, flavor,
+archive size, and SHA-256. If the Latest feed changes between displaying the
+plan and starting the download, the app asks the user to review the new plan.
 
 PyInstaller is deliberately run in **one-folder** mode. A Windows venv is not a
 portable runtime, and one-file mode would unpack this multi-gigabyte backend on
